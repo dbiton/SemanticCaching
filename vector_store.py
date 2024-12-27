@@ -37,4 +37,4 @@ class VectorStore:
         distances, indices = self.index.search(query_embedding, k)
         texts = [self.texts[i[0]] for i in indices]
         embeddings = self.index.reconstruct_batch(indices.flatten())
-        return texts, embeddings, distances 
+        return texts, embeddings, distances, indices
