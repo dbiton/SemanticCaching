@@ -59,11 +59,12 @@ def plot(results):
 
 def generate_embeds(mean, std_dev, dim, len):    
     np.random.seed(0)
-    for _ in range(len):
-        yield np.random.normal(mean, std_dev, dim)
+    return [np.random.normal(mean, std_dev, dim) for _ in range(len)]
 
 def main():
-    strings_origin, strings_similar = load_data_long(1000)
+    '''
+    EMBEDS_COUNT = 1000
+    strings_origin, strings_similar = load_data_long(EMBEDS_COUNT)
     embeds = embed_strings(strings_origin + strings_similar)
     embeds_origin = embeds[:len(strings_origin)]
     embeds_similar = embeds[len(strings_origin):]
@@ -73,11 +74,18 @@ def main():
     
     dim = embeds_origin[0].shape[0]
     
+    np.random.shuffle(embeds)
+    '''
+    dim = 384
+    same_embed_distance = 1
+    embeds = generate_embeds(0, 0.04, 384, 10000)
+    
     policies = {
+        "LD": LD,
         "RR": RR,
         "LRU": LRU,
         "LFU": LFU,
-        # "FIFO": FIFO
+        "FIFO": FIFO,
     }
     
     results = {}
@@ -92,11 +100,18 @@ def main():
                 distances, neighbors = index.search(embed_as_array, 1)
                 if neighbors[0][0] != -1 and distances[0][0] <= same_embed_distance:
                     cache_hits += 1
-                    id_remove = policy.log_access(neighbors[0][0])
+                    if policy_name == "LD":
+                        neigh_embed = embeds[neighbors[0][0]]
+                        id_remove = policy.log_access(neighbors[0][0], neigh_embed)
+                    else:
+                        id_remove = policy.log_access(neighbors[0][0])
                 else:
                     index.add_with_ids(embed_as_array, np.array([i_embed]))
-                    id_remove = policy.log_access(i_embed)
-                if id_remove is not None:
+                    if policy_name == "LD":
+                        id_remove = policy.log_access(i_embed, embed)
+                    else:
+                        id_remove = policy.log_access(i_embed)
+                if id_remove != -1:
                     index.remove_ids(np.array([id_remove]))
             iter_results = {
                 "Hit Ratio": cache_hits / len(embeds)
