@@ -30,7 +30,6 @@ def load_data_short():
 
 def load_quora():
     df = pd.read_csv('questions.csv')
-    x = 3
     
 def plot(results):
     """
@@ -58,10 +57,13 @@ def plot(results):
         plt.tight_layout()
         plt.savefig(f"{prop_name}.png")
 
+def generate_embeds(mean, std_dev, dim, len):    
+    np.random.seed(0)
+    for _ in range(len):
+        yield np.random.normal(mean, std_dev, dim)
+
 def main():
-    load_quora()
-    
-    strings_origin, strings_similar = load_data_long(2000)
+    strings_origin, strings_similar = load_data_long(1000)
     embeds = embed_strings(strings_origin + strings_similar)
     embeds_origin = embeds[:len(strings_origin)]
     embeds_similar = embeds[len(strings_origin):]
@@ -75,13 +77,13 @@ def main():
         "RR": RR,
         "LRU": LRU,
         "LFU": LFU,
-        "FIFO": FIFO
+        # "FIFO": FIFO
     }
     
     results = {}
     
     for policy_name, policy_constructor in policies.items():
-        for cache_size in range(32, 640, 32):
+        for cache_size in range(10, 100, 10):
             index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
             policy: CachePolicy = policy_constructor(cache_size)
             cache_hits = 0
@@ -90,15 +92,14 @@ def main():
                 distances, neighbors = index.search(embed_as_array, 1)
                 if neighbors[0][0] != -1 and distances[0][0] <= same_embed_distance:
                     cache_hits += 1
-                    embed_remove = policy.log_access(tuple(embed.flatten()))
+                    id_remove = policy.log_access(neighbors[0][0])
                 else:
                     index.add_with_ids(embed_as_array, np.array([i_embed]))
-                    embed_remove = policy.log_access(tuple(embed.flatten()))
-                if embed_remove is not None:
-                    removed_id = np.where((embeds == np.array(embed_remove)).all(axis=1))[0][0]
-                    index.remove_ids(np.array([removed_id]))
+                    id_remove = policy.log_access(i_embed)
+                if id_remove is not None:
+                    index.remove_ids(np.array([id_remove]))
             iter_results = {
-                "Cache Hit Percentage": cache_hits / len(embeds)
+                "Hit Ratio": cache_hits / len(embeds)
             }
             
             for prop_name, prop in iter_results.items():
