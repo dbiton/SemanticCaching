@@ -91,7 +91,7 @@ def main():
         # "FactorAnalysis": reduce_fa,
         # "ICA": reduce_ica,
         # "GaussRandProj": reduce_grp,
-        # "NOOP": reduce_noop
+        "NAIVE": reduce_naive
     }
     
     step_size = 10
