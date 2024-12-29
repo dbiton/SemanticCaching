@@ -44,7 +44,7 @@ def plot(results):
         plt.figure()
 
         i = 0
-        markers = ["o", "s", "^", "v", "D"]
+        markers = ["o", "s", "^", "v", "D", "<", ">", "X", "+"]
         for cache_name, prop in prop_results.items():
             cache_size = list(prop.keys())
             prop_values = list(prop.values())  # Unzip dimensions and scores
@@ -78,10 +78,14 @@ def main():
     '''
     dim = 384
     same_embed_distance = 1
-    embeds = generate_embeds(0, 0.04, 384, 100000)
+    embeds = generate_embeds(0, 0.04, 384, 10000)
     
     policies = {
-        "LD": LD,
+        "ProbMinCounter": ProbMinCounter,
+        "ProbMinDensity": ProbMinDensity,
+        "MinCounter": MinCounter,
+        "MinDensity": MinDensity,
+        "MaxDensity": MaxDensity,
         "RR": RR,
         "LRU": LRU,
         "LFU": LFU,
@@ -100,14 +104,14 @@ def main():
                 distances, neighbors = index.search(embed_as_array, 1)
                 if neighbors[0][0] != -1 and distances[0][0] <= same_embed_distance:
                     cache_hits += 1
-                    if policy_name == "LD":
+                    if policy_name in ["MinDensity", "MaxDensity", "ProbMinCounter", "ProbMinDensity", "MinCounter"]:
                         neigh_embed = embeds[neighbors[0][0]]
                         id_remove = policy.log_access(neighbors[0][0], neigh_embed)
                     else:
                         id_remove = policy.log_access(neighbors[0][0])
                 else:
                     index.add_with_ids(embed_as_array, np.array([i_embed]))
-                    if policy_name == "LD":
+                    if policy_name in ["MinDensity", "MaxDensity", "ProbMinCounter", "ProbMinDensity", "MinCounter"]:
                         id_remove = policy.log_access(i_embed, embed)
                     else:
                         id_remove = policy.log_access(i_embed)
