@@ -91,34 +91,50 @@ class FIFO(CachePolicy):
 class LD(CachePolicy):
     def __init__(self, size: int, cell_size = 0.04):
         super().__init__(size)
-        self.items = set()  # Tracks cached items
-        self.densities = {}  # Tracks densities of cached items
-        self.sketch = CountMin(size, 3)  # Count-Min Sketch for density estimation
-        self.cell_size = cell_size  # Granularity for density calculation
+        self.items = set()
+        self.densities = {}
+        self.sketch = CountMin(size, 3)
+        self.cell_size = cell_size
 
     def log_access(self, item: int, position: float) -> int:
-        # Round position to the nearest cell
         position_rounded = np.round(position / self.cell_size) * self.cell_size
-        
-        # If item is not in the cache
         if item not in self.items:
-            # If the cache is full, evict the item with the lowest density
             if len(self.items) >= self.size:
-                # Find the item with the lowest density
                 removed_item = min(self.densities, key=self.densities.get)
                 self.items.remove(removed_item)
                 self.densities.pop(removed_item)
             else:
                 removed_item = -1
-
-            # Add the new item to the cache
             self.items.add(item)
             self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
         else:
-            # Update the density of the existing item
             removed_item = -1
             self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
-        
+        return removed_item
+
+class LD(CachePolicy):
+    def __init__(self, size: int, cell_size = 0.04):
+        super().__init__(size)
+        self.items = set()
+        self.densities = {}
+        self.items_counts = {}
+        self.sketch = CountMin(size, 3)
+        self.cell_size = cell_size
+
+    def log_access(self, item: int, position: float) -> int:
+        position_rounded = np.round(position / self.cell_size) * self.cell_size
+        if item not in self.items:
+            if len(self.items) >= self.size:
+                removed_item = min(self.densities, key=self.densities.get)
+                self.items.remove(removed_item)
+                self.densities.pop(removed_item)
+            else:
+                removed_item = -1
+            self.items.add(item)
+            self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
+        else:
+            removed_item = -1
+            self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
         return removed_item
 
 # Example usage

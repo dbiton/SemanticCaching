@@ -78,7 +78,7 @@ def main():
     '''
     dim = 384
     same_embed_distance = 1
-    embeds = generate_embeds(0, 0.04, 384, 10000)
+    embeds = generate_embeds(0, 0.04, 384, 100000)
     
     policies = {
         "LD": LD,
