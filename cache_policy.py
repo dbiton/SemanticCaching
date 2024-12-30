@@ -88,89 +88,36 @@ class FIFO(CachePolicy):
             self.items.append(item)
         return -1
 
-class MinDensity(CachePolicy):
-    def __init__(self, size: int, cell_size = 0.04):
+class DensityBased(CachePolicy):
+    def __init__(self, size: int, cell_size = 1/384):
         super().__init__(size)
-        self.items = set()
+        self.items = dict()
         self.densities = {}
         self.items_counts = {}
         self.sketch = CountMin(size, 3)
         self.cell_size = cell_size
 
+    def get_key(self, position):
+        return np.round(position / self.cell_size).astype(int)
+
+    def get_remove_candidate(self, position):
+        raise Exception('virtual method')
+    
     def log_access(self, item: int, position: float) -> int:
-        position_rounded = np.round(position / self.cell_size) * self.cell_size
+        position_rounded = self.get_key(position)
         if item not in self.items:
             if len(self.items) >= self.size:
-                removed_item = min(self.densities, key=self.densities.get)
-                self.sketch.update_and_query(position_rounded, -self.items_counts[removed_item])
-                self.items.remove(removed_item)
-                self.densities.pop(removed_item)
-                self.items_counts.pop(removed_item)
-            else:
-                removed_item = -1
-            self.items.add(item)
-            self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
-            self.items_counts[item] = 1
-        else:
-            removed_item = -1
-            self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
-            self.items_counts[item] += 1
-        return removed_item
-
-class MinCounter(CachePolicy):
-    def __init__(self, size: int, cell_size = 0.04):
-        super().__init__(size)
-        self.items = set()
-        self.densities = {}
-        self.items_counts = {}
-        self.sketch = CountMin(size, 3)
-        self.cell_size = cell_size
-
-    def log_access(self, item: int, position: float) -> int:
-        position_rounded = np.round(position / self.cell_size) * self.cell_size
-        if item not in self.items:
-            if len(self.items) >= self.size:
-                removed_item = min(self.items_counts, key=self.items_counts.get)
-                self.sketch.update_and_query(position_rounded, -self.items_counts[removed_item])
-                self.items.remove(removed_item)
-                self.densities.pop(removed_item)
-                self.items_counts.pop(removed_item)
-            else:
-                removed_item = -1
-            self.items.add(item)
-            self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
-            self.items_counts[item] = 1
-        else:
-            removed_item = -1
-            self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
-            self.items_counts[item] += 1
-        return removed_item
-
-class ProbMinDensity(CachePolicy):
-    def __init__(self, size: int, cell_size = 0.04):
-        super().__init__(size)
-        self.items = set()
-        self.densities = {}
-        self.items_counts = {}
-        self.sketch = CountMin(size, 3)
-        self.cell_size = cell_size
-
-    def log_access(self, item: int, position: float) -> int:
-        position_rounded = np.round(position / self.cell_size) * self.cell_size
-        if item not in self.items:
-            if len(self.items) >= self.size:
-                removed_item = min(self.densities, key=self.densities.get)
-                min_density = self.densities[removed_item]
-                thresh = 1 / (min_density + 1)
-                if random.random() > thresh:
+                removed_item = self.get_remove_candidate(position)
+                if removed_item == -1:
                     return -1
-                self.sketch.update_and_query(position_rounded, -self.items_counts[removed_item])
-                self.items.remove(removed_item)
+                removed_position_rounded = self.get_key(self.items[removed_item])
+                self.sketch.update_and_query(removed_position_rounded, -self.items_counts[removed_item])
                 self.densities.pop(removed_item)
+                self.items.pop(removed_item)
                 self.items_counts.pop(removed_item)
             else:
                 removed_item = -1
-            self.items.add(item)
+            self.items[item] = position
             self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
             self.items_counts[item] = 1
         else:
@@ -178,67 +125,34 @@ class ProbMinDensity(CachePolicy):
             self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
             self.items_counts[item] += 1
         return removed_item
+    
+class MinDensity(DensityBased):
+    def get_remove_candidate(self, position):
+        return min(self.densities, key=self.densities.get)
 
-class ProbMinCounter(CachePolicy):
-    def __init__(self, size: int, cell_size = 0.04):
-        super().__init__(size)
-        self.items = set()
-        self.densities = {}
-        self.items_counts = {}
-        self.sketch = CountMin(size, 3)
-        self.cell_size = cell_size
+class MinCounter(DensityBased):
+    def get_remove_candidate(self, position):
+        return min(self.items_counts, key=self.items_counts.get)
 
-    def log_access(self, item: int, position: float) -> int:
-        position_rounded = np.round(position / self.cell_size) * self.cell_size
-        if item not in self.items:
-            if len(self.items) >= self.size:
-                removed_item = min(self.items_counts, key=self.items_counts.get)
-                min_counter = self.items_counts[removed_item]
-                thresh = 1 / (min_counter + 1)
-                if random.random() > thresh:
-                    return -1
-                self.sketch.update_and_query(position_rounded, -self.items_counts[removed_item])
-                self.items.remove(removed_item)
-                self.densities.pop(removed_item)
-                self.items_counts.pop(removed_item)
-            else:
-                removed_item = -1
-            self.items.add(item)
-            self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
-            self.items_counts[item] = 1
-        else:
-            removed_item = -1
-            self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
-            self.items_counts[item] += 1
+class ProbMinDensity(DensityBased):
+    def get_remove_candidate(self, position):
+        min_density = min(self.densities.values())
+        removed_item = random.choice([item for item, density in self.densities.items() if density == min_density])
+        removed_position_rounded = self.get_key(self.items[removed_item])
+        updated_density = self.sketch.update_and_query(removed_position_rounded, 0)
+        self.densities[removed_item] = updated_density
+        thresh = 1 / (updated_density + 1)
+        if random.random() < thresh:
+            return -1
         return removed_item
 
-class MaxDensity(CachePolicy):
-    def __init__(self, size: int, cell_size = 0.04):
-        super().__init__(size)
-        self.items = set()
-        self.densities = {}
-        self.items_counts = {}
-        self.sketch = CountMin(size, 3)
-        self.cell_size = cell_size
-
-    def log_access(self, item: int, position: float) -> int:
-        position_rounded = np.round(position / self.cell_size) * self.cell_size
-        if item not in self.items:
-            if len(self.items) >= self.size:
-                removed_item = max(self.densities, key=self.densities.get)
-                self.sketch.update_and_query(position_rounded, -self.items_counts[removed_item])
-                self.items.remove(removed_item)
-                self.densities.pop(removed_item)
-                self.items_counts.pop(removed_item)
-            else:
-                removed_item = -1
-            self.items.add(item)
-            self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
-            self.items_counts[item] = 1
-        else:
-            removed_item = -1
-            self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
-            self.items_counts[item] += 1
+class ProbMinCounter(DensityBased):
+    def get_remove_candidate(self, position):
+        removed_item = min(self.items_counts, key=self.items_counts.get)
+        min_counter = self.items_counts[removed_item]
+        thresh = 1 / (min_counter + 1)
+        if random.random() < thresh:
+            return -1
         return removed_item
 
 # Example usage

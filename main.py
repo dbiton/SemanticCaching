@@ -28,8 +28,12 @@ def load_data_short():
     with open("mock_data.json", "r") as f:
         return json.load(f)
 
-def load_quora():
-    df = pd.read_csv('questions.csv')
+def embed_titles(n = -1):
+    with open(f"Titles.txt", encoding="utf-8") as f:
+        titles_strings = f.readlines(n)
+    titles_embeddings = [e.tolist() for e in embed_strings(titles_strings)]
+    with open("TitlesEmbeddings.json", "w") as f:
+        json.dump(list(zip(titles_strings, titles_embeddings)), f)
     
 def plot(results):
     """
@@ -61,9 +65,14 @@ def generate_embeds(mean, std_dev, dim, len):
     np.random.seed(0)
     return [np.random.normal(mean, std_dev, dim) for _ in range(len)]
 
+def load_embeds():
+    with open("TitlesEmbeddings.json", "r") as f:
+        embeds = json.load(f)
+        return np.stack([np.array(e[1]) for e in embeds], axis=0)
+
 def main():
-    '''
     EMBEDS_COUNT = 1000
+    '''
     strings_origin, strings_similar = load_data_long(EMBEDS_COUNT)
     embeds = embed_strings(strings_origin + strings_similar)
     embeds_origin = embeds[:len(strings_origin)]
@@ -71,47 +80,46 @@ def main():
     
     l2_distances = np.linalg.norm(embeds_origin - embeds_similar, axis=1)
     same_embed_distance = np.max(l2_distances)
-    
-    dim = embeds_origin[0].shape[0]
-    
-    np.random.shuffle(embeds)
     '''
+    print("loading embeds...")
+    embeds = load_embeds()[:10000]
+    print("loaded!")
     dim = 384
     same_embed_distance = 1
-    embeds = generate_embeds(0, 0.04, 384, 10000)
+    alpha = same_embed_distance / dim
     
     policies = {
         "ProbMinCounter": ProbMinCounter,
         "ProbMinDensity": ProbMinDensity,
         "MinCounter": MinCounter,
-        "MinDensity": MinDensity,
-        "MaxDensity": MaxDensity,
-        "RR": RR,
-        "LRU": LRU,
+        # "MinDensity": MinDensity(0),
+        #"MaxDensity": MaxDensity,
+        #"RR": RR,
+        #"LRU": LRU,
         "LFU": LFU,
-        "FIFO": FIFO,
+        #"FIFO": FIFO,
     }
     
     results = {}
     
     for policy_name, policy_constructor in policies.items():
-        for cache_size in range(10, 100, 10):
+        for cache_size in range(200, 3200, 200):
             index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
-            policy: CachePolicy = policy_constructor(cache_size)
+            policy = policy_constructor(cache_size)
             cache_hits = 0
             for i_embed, embed in enumerate(embeds):
-                embed_as_array = embed.reshape(1, embed.shape[0])
+                embed_as_array = embed.reshape(1, dim)
                 distances, neighbors = index.search(embed_as_array, 1)
                 if neighbors[0][0] != -1 and distances[0][0] <= same_embed_distance:
                     cache_hits += 1
-                    if policy_name in ["MinDensity", "MaxDensity", "ProbMinCounter", "ProbMinDensity", "MinCounter"]:
+                    if policy_name in ["MinDensity", "MaxDensity", "ProbMinCounter", "ProbMinDensity", "MinCounter", "ProbMinDensity1", "ProbMinDensity2", "ProbMinDensity4"]:
                         neigh_embed = embeds[neighbors[0][0]]
                         id_remove = policy.log_access(neighbors[0][0], neigh_embed)
                     else:
                         id_remove = policy.log_access(neighbors[0][0])
                 else:
                     index.add_with_ids(embed_as_array, np.array([i_embed]))
-                    if policy_name in ["MinDensity", "MaxDensity", "ProbMinCounter", "ProbMinDensity", "MinCounter"]:
+                    if policy_name in ["MinDensity", "MaxDensity", "ProbMinCounter", "ProbMinDensity", "MinCounter", "ProbMinDensity1", "ProbMinDensity2", "ProbMinDensity4"]:
                         id_remove = policy.log_access(i_embed, embed)
                     else:
                         id_remove = policy.log_access(i_embed)
