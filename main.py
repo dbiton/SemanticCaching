@@ -82,17 +82,18 @@ def main():
     same_embed_distance = np.max(l2_distances)
     '''
     print("loading embeds...")
-    embeds = load_embeds()[:10000]
+    embeds = load_embeds()[:1000]
     print("loaded!")
     dim = 384
-    same_embed_distance = 1
+    same_embed_distance = .5
     alpha = same_embed_distance / dim
     
     policies = {
+        "ProbMisses": ProbMisses,
         "ProbMinCounter": ProbMinCounter,
         "ProbMinDensity": ProbMinDensity,
-        "MinCounter": MinCounter,
-        # "MinDensity": MinDensity(0),
+        #"MinCounter": MinCounter,
+        #"MinDensity": MinDensity,
         #"MaxDensity": MaxDensity,
         #"RR": RR,
         #"LRU": LRU,
@@ -103,7 +104,7 @@ def main():
     results = {}
     
     for policy_name, policy_constructor in policies.items():
-        for cache_size in range(200, 3200, 200):
+        for cache_size in range(100, 1000, 100):
             index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
             policy = policy_constructor(cache_size)
             cache_hits = 0
@@ -112,17 +113,12 @@ def main():
                 distances, neighbors = index.search(embed_as_array, 1)
                 if neighbors[0][0] != -1 and distances[0][0] <= same_embed_distance:
                     cache_hits += 1
-                    if policy_name in ["MinDensity", "MaxDensity", "ProbMinCounter", "ProbMinDensity", "MinCounter", "ProbMinDensity1", "ProbMinDensity2", "ProbMinDensity4"]:
-                        neigh_embed = embeds[neighbors[0][0]]
-                        id_remove = policy.log_access(neighbors[0][0], neigh_embed)
-                    else:
-                        id_remove = policy.log_access(neighbors[0][0])
+                    neigh_embed = embeds[neighbors[0][0]]
+                    id_remove, _ = policy.log_access(neighbors[0][0], neigh_embed)
                 else:
-                    index.add_with_ids(embed_as_array, np.array([i_embed]))
-                    if policy_name in ["MinDensity", "MaxDensity", "ProbMinCounter", "ProbMinDensity", "MinCounter", "ProbMinDensity1", "ProbMinDensity2", "ProbMinDensity4"]:
-                        id_remove = policy.log_access(i_embed, embed)
-                    else:
-                        id_remove = policy.log_access(i_embed)
+                    id_remove, add_id = policy.log_access(i_embed, embed)
+                    if add_id:
+                        index.add_with_ids(embed_as_array, np.array([i_embed]))
                 if id_remove != -1:
                     index.remove_ids(np.array([id_remove]))
             iter_results = {
