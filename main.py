@@ -8,10 +8,12 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 from cache_policy import *
 
+has_gpu = False
+
 def embed_strings(strings: List[str], model_name='all-MiniLM-L6-v2'):
     model = SentenceTransformer(model_name)
     embeddings = model.encode(strings, convert_to_numpy=True)
-    return embeddings.astype(np.float64)
+    return embeddings
 
 def load_data_long(n: None):
     with open("prompts.json", "r") as f:
@@ -78,45 +80,54 @@ def main():
     embeds_origin = embeds[:len(strings_origin)]
     embeds_similar = embeds[len(strings_origin):]
     
-    l2_distances = np.linalg.norm(embeds_origin - embeds_similar, axis=1)
+    l2_distances = np.lina5lg.norm(embeds_origin - embeds_similar, axis=1)
     same_embed_distance = np.max(l2_distances)
     '''
     print("loading embeds...")
-    embeds = load_embeds()[:1000]
+    embeds = load_embeds()
+    num_samples = 5000
+    sampled_indices = np.random.choice(embeds.shape[0], size=num_samples, replace=False)
+    embeds = embeds[sampled_indices]
     print("loaded!")
     dim = 384
-    same_embed_distance = .5
+    same_embed_distance = 1
     alpha = same_embed_distance / dim
     
     policies = {
-        "ProbMisses": ProbMisses,
-        "ProbMinCounter": ProbMinCounter,
-        "ProbMinDensity": ProbMinDensity,
-        #"MinCounter": MinCounter,
+        "ProximityScore": ProximityScore,
+        #"ProbMisses": ProbMisses,
+        #"ProbMinCounter": ProbMinCounter,
+        #"ProbMinDensity": ProbMinDensity,
+        "MinCounter": MinCounter,
         #"MinDensity": MinDensity,
         #"MaxDensity": MaxDensity,
         #"RR": RR,
         #"LRU": LRU,
         "LFU": LFU,
-        #"FIFO": FIFO,
+        # "FIFO": FIFO,
     }
     
     results = {}
     
     for policy_name, policy_constructor in policies.items():
-        for cache_size in range(100, 1000, 100):
+        print(policy_name)
+        for cache_size in range(200, 1000, 200):
             index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
+
             policy = policy_constructor(cache_size)
             cache_hits = 0
             for i_embed, embed in enumerate(embeds):
+                policy_size = policy.count_items()
+                assert(index.ntotal == policy_size)
+                
                 embed_as_array = embed.reshape(1, dim)
-                distances, neighbors = index.search(embed_as_array, 1)
+                distances, neighbors = index.search(embed_as_array, max(1,index.ntotal))
                 if neighbors[0][0] != -1 and distances[0][0] <= same_embed_distance:
                     cache_hits += 1
                     neigh_embed = embeds[neighbors[0][0]]
-                    id_remove, _ = policy.log_access(neighbors[0][0], neigh_embed)
+                    id_remove, _ = policy.log_access(neighbors[0][0], neigh_embed, list(distances[0]))
                 else:
-                    id_remove, add_id = policy.log_access(i_embed, embed)
+                    id_remove, add_id = policy.log_access(i_embed, embed, list(distances[0]))
                     if add_id:
                         index.add_with_ids(embed_as_array, np.array([i_embed]))
                 if id_remove != -1:

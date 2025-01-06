@@ -8,15 +8,18 @@ class CachePolicy:
     def __init__(self, size: int):
         self.size = size
     
-    def log_access(self, item: int, position) -> Tuple[int, bool]:
+    def log_access(self, item: int, position, distances) -> Tuple[int, bool]:
         return -1
 
+    def count_items(self):
+        return len(self.items)
+    
 class LRU(CachePolicy):
     def __init__(self, size: int):
         super().__init__(size)
         self.items = OrderedDict()
 
-    def log_access(self, item: int, position) -> int:
+    def log_access(self, item: int, position, distances) -> int:
         if item in self.items:
             self.items.move_to_end(item)  # Mark as recently used
         self.items[item] = None  # Value is irrelevant, only keys are tracked
@@ -30,7 +33,7 @@ class RR(CachePolicy):
         super().__init__(size)
         self.items = set()
 
-    def log_access(self, item: int, position) -> int:
+    def log_access(self, item: int, position, distances) -> int:
         self.items.add(item)
         if len(self.items) > self.size:
             removed_item = random.choice(list(self.items))
@@ -44,7 +47,7 @@ class LFU(CachePolicy):
         self.items = set()
         self.freq = defaultdict(int)
 
-    def log_access(self, item: int, position) -> int:
+    def log_access(self, item: int, position, distances) -> int:
         if item in self.items:
             self.freq[item] += 1
         else:
@@ -66,7 +69,7 @@ class FIFO(CachePolicy):
         super().__init__(size)
         self.items = deque()
 
-    def log_access(self, item: int, position) -> int:
+    def log_access(self, item: int, position, distances) -> int:
         if item not in self.items:
             if len(self.items) >= self.size:
                 removed_item = self.items.popleft()
@@ -81,37 +84,39 @@ class DensityBased(CachePolicy):
         self.items = dict()
         self.densities = {}
         self.items_counts = {}
-        self.sketch = CountMin(size, 3)
-        self.sketch_misses = CountMin(size, 3)
+        self.cache_hits = defaultdict(int)
+        self.cache_misses = defaultdict(int)
         self.cell_size = cell_size
 
     def get_key(self, position):
-        return np.round(position / self.cell_size).astype(int)
+        return tuple(np.round(position / self.cell_size).astype(int))
 
     def get_remove_candidate(self, position):
         raise Exception('virtual method')
     
-    def log_access(self, item: int, position: float) -> int:
+    def log_access(self, item: int, position: float, distances) -> int:
         position_rounded = self.get_key(position)
         if item not in self.items:
             if len(self.items) >= self.size:
                 removed_item = self.get_remove_candidate(position)
                 if removed_item == -1:
-                    self.sketch_misses.update_and_query(position_rounded, 1)
+                    self.cache_misses[position_rounded] += 1
                     return -1, False
                 removed_position_rounded = self.get_key(self.items[removed_item])
-                self.sketch.update_and_query(removed_position_rounded, -self.items_counts[removed_item])
+                # self.cache_hits[removed_position_rounded] -= self.items_counts[removed_item]
                 self.densities.pop(removed_item)
                 self.items.pop(removed_item)
                 self.items_counts.pop(removed_item)
             else:
                 removed_item = -1
             self.items[item] = position
-            self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
+            self.cache_hits[position_rounded] += 1
+            self.densities[item] = self.cache_hits[position_rounded]
             self.items_counts[item] = 1
         else:
             removed_item = -1
-            self.densities[item] = self.sketch.update_and_query(position_rounded, 1)
+            self.cache_hits[position_rounded] += 1
+            self.densities[item] = self.cache_hits[position_rounded]
             self.items_counts[item] += 1
         return removed_item, True
     
@@ -128,7 +133,7 @@ class ProbMinDensity(DensityBased):
         min_density = min(self.densities.values())
         removed_item = random.choice([item for item, density in self.densities.items() if density == min_density])
         removed_position_rounded = self.get_key(self.items[removed_item])
-        updated_density = self.sketch.update_and_query(removed_position_rounded, 0)
+        updated_density = self.cache_hits[removed_position_rounded]
         self.densities[removed_item] = updated_density
         thresh = 1 / (updated_density + 1)
         if random.random() < thresh:
@@ -147,7 +152,7 @@ class ProbMinCounter(DensityBased):
 class ProbMisses(DensityBased):
     def get_remove_candidate(self, position):
         position_rounded = self.get_key(position)
-        misses = self.sketch_misses.update_and_query(position_rounded, 0)
+        misses = self.cache_misses[position_rounded]
         removed_item = min(self.items_counts, key=self.items_counts.get)
         min_counter = self.items_counts[removed_item]
         div = max(1, min_counter + 1 - misses)
@@ -155,6 +160,93 @@ class ProbMisses(DensityBased):
         if random.random() < thresh:
             return -1
         return removed_item
+
+class ProximityScore(CachePolicy):
+    def __init__(self, size: int):
+        super().__init__(size)
+        self.items = dict()
+        self.neigh_distance = 3
+        self.decay = 0.0
+
+    def get_proximity_score(self, distances):
+        sum_distance = sum(d for d in distances if d < self.neigh_distance)
+        if sum_distance == 0:
+            return 0
+        return 1 / sum_distance
+    
+    def log_access(self, item: int, position, distances) -> int:
+        if item in self.items:
+            self.items[item] = self.decay * self.items[item] + (1 - self.decay) * self.get_proximity_score(distances)
+            return -1, True
+        else:
+            min_item = -1
+            if self.count_items() >= self.size:
+                min_item = min(self.items, key=self.items.get)
+                self.items.pop(min_item)
+            self.items[item] = self.get_proximity_score(distances)
+            return min_item, True
+            
+class TinyLFU(CachePolicy):
+    """
+    A simple version of TinyLFU that uses:
+    1) A CountMinSketch to approximate frequency.
+    2) A single LRU data structure for actual caching.
+    3) A frequency-based admission policy.
+    
+    Pseudocode:
+    - On every access, update the sketch for 'item'.
+    - If 'item' is already cached:
+        * Move it to the 'most-recently-used' position in LRU.
+    - Else:
+        * If the cache is not full, admit 'item' directly.
+        * If the cache is full:
+            1) Select the LRU victim from the cache (or randomly).
+            2) Compare frequency of 'item' with frequency of victim.
+               If freq(item) >= freq(victim), evict victim and insert 'item'.
+               Otherwise, do not admit 'item' (cache unchanged).
+    """
+    def __init__(self, size: int, sketch_width=1024, sketch_depth=4):
+        super().__init__(size)
+        # This OrderedDict will serve as our LRU (the end is MRU).
+        # Key: item, Value: unused or metadata (can store frequency, but optional).
+        self.items = OrderedDict()
+        
+        # CountMin sketch for frequency approximation
+        # You can adjust width/depth based on error/epsilon requirements
+        self.sketch = CountMin(width=sketch_width, depth=sketch_depth)
+    
+    def log_access(self, item: int, position, distances) -> Tuple[int, bool]:
+        # 1) Update frequency sketch
+        self.sketch.update(item, 1)
+
+        # 2) If item is already in the cache (LRU), move it to MRU
+        if item in self.items:
+            # Move to the most-recently-used end
+            self.items.move_to_end(item)
+            return -1, True  # No eviction, successful access
+
+        # 3) Item is not in cache
+        if len(self.items) < self.size:
+            # There's space to admit item
+            self.items[item] = True
+            return -1, True
+        else:
+            # Cache is full: choose a victim from the LRU
+            # Victim = the least-recently-used item (front of OrderedDict)
+            victim, _ = self.items.popitem(last=False)
+            
+            # Compare frequencies: if new item has freq >= victim, admit new item
+            freq_item = self.sketch.query(item)
+            freq_victim = self.sketch.query(victim)
+            if freq_item >= freq_victim:
+                # Evict victim and admit new item
+                self.items[item] = True
+                return victim, True
+            else:
+                # Re-insert the victim (since we decided not to evict it)
+                # Because in "real" TinyLFU you'd only remove the victim from LRU if new item is admitted
+                self.items[victim] = True
+                return -1, False  # no eviction, new item not admitted
 
 # Example usage
 if __name__ == "__main__":

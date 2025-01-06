@@ -9,9 +9,12 @@ class CountMin:
         self.seeds = np.random.randint(1, 100000, size=depth)
 
     def _hash(self, index, i):
-        return mmh3.hash(index, self.seeds[i]) % self.width
+        return mmh3.hash(bytes(index), self.seeds[i]) % self.width
 
-    def update_and_query(self, index, value):
+    def query(self, index):
+        return self.update(index, 0)
+    
+    def update(self, index, value):
         min_estimate = float('inf')
         for i in range(self.depth):
             hash_index = self._hash(index, i)
