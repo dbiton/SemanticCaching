@@ -79,7 +79,7 @@ class FIFO(CachePolicy):
         return -1, True
 
 class DensityBased(CachePolicy):
-    def __init__(self, size: int, cell_size = 10 * 1/384):
+    def __init__(self, size: int, cell_size = 0.707 * 1/384):
         super().__init__(size)
         self.items = dict()
         self.densities = {}
@@ -165,7 +165,7 @@ class ProximityScore(CachePolicy):
     def __init__(self, size: int):
         super().__init__(size)
         self.items = dict()
-        self.neigh_distance = 3
+        self.neigh_distance = 0.707
         self.decay = 0.0
 
     def get_proximity_score(self, distances):

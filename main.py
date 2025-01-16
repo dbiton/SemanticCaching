@@ -73,7 +73,6 @@ def load_embeds():
         return np.stack([np.array(e[1]) for e in embeds], axis=0)
 
 def main():
-    EMBEDS_COUNT = 1000
     '''
     strings_origin, strings_similar = load_data_long(EMBEDS_COUNT)
     embeds = embed_strings(strings_origin + strings_similar)
@@ -84,13 +83,15 @@ def main():
     same_embed_distance = np.max(l2_distances)
     '''
     print("loading embeds...")
-    embeds = load_embeds()
-    num_samples = 5000
+    num_samples = 4000
+    strings_origin, strings_similar = load_data_long(num_samples)
+    embeds = embed_strings(strings_origin + strings_similar)
     sampled_indices = np.random.choice(embeds.shape[0], size=num_samples, replace=False)
     embeds = embeds[sampled_indices]
     print("loaded!")
     dim = 384
-    same_embed_distance = 1
+    same_embed_distance = 0.5
+    similar_embed_distance = 0.707
     alpha = same_embed_distance / dim
     
     policies = {
@@ -111,15 +112,13 @@ def main():
     
     for policy_name, policy_constructor in policies.items():
         print(policy_name)
-        for cache_size in range(200, 1000, 200):
+        for cache_size in range(200, 2000, 200):
             index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
-
             policy = policy_constructor(cache_size)
             cache_hits = 0
             for i_embed, embed in enumerate(embeds):
                 policy_size = policy.count_items()
                 assert(index.ntotal == policy_size)
-                
                 embed_as_array = embed.reshape(1, dim)
                 distances, neighbors = index.search(embed_as_array, max(1,index.ntotal))
                 if neighbors[0][0] != -1 and distances[0][0] <= same_embed_distance:
@@ -135,7 +134,6 @@ def main():
             iter_results = {
                 "Hit Ratio": cache_hits / len(embeds)
             }
-            
             for prop_name, prop in iter_results.items():
                 if prop_name not in results:
                     results[prop_name] = {}
