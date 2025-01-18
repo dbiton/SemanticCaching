@@ -92,29 +92,29 @@ def main():
     dim = 384
     same_embed_distance = 0.5
     similar_embed_distance = 0.707
-    alpha = same_embed_distance / dim
     
     policies = {
-        "ProximityScore": ProximityScore,
+        "OPT": OPT(embeds, same_embed_distance),
+        "ProximityScore": ProximityScore(similar_embed_distance, 0.5),
         #"ProbMisses": ProbMisses,
         #"ProbMinCounter": ProbMinCounter,
         #"ProbMinDensity": ProbMinDensity,
-        "MinCounter": MinCounter,
+        "MinCounter": MinCounter(similar_embed_distance / 384),
         #"MinDensity": MinDensity,
         #"MaxDensity": MaxDensity,
         #"RR": RR,
         #"LRU": LRU,
-        "LFU": LFU,
+        "LFU": LFU(),
         # "FIFO": FIFO,
     }
     
     results = {}
     
-    for policy_name, policy_constructor in policies.items():
+    for policy_name, policy in policies.items():
         print(policy_name)
         for cache_size in range(200, 2000, 200):
             index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
-            policy = policy_constructor(cache_size)
+            policy.set_size(cache_size)
             cache_hits = 0
             for i_embed, embed in enumerate(embeds):
                 policy_size = policy.count_items()

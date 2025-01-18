@@ -5,7 +5,10 @@ from typing import Tuple
 import numpy as np
 from count_min import CountMin
 class CachePolicy:
-    def __init__(self, size: int):
+    def __init__(self):
+        self.size = None
+    
+    def set_size(self, size: int) -> None:
         self.size = size
     
     def log_access(self, item: int, position, distances) -> Tuple[int, bool]:
@@ -15,10 +18,13 @@ class CachePolicy:
         return len(self.items)
     
 class LRU(CachePolicy):
-    def __init__(self, size: int):
-        super().__init__(size)
-        self.items = OrderedDict()
+    def __init__(self):
+        super().__init__()
 
+    def set_size(self, size: int) -> None:
+        self.size = size
+        self.items = OrderedDict()
+            
     def log_access(self, item: int, position, distances) -> int:
         if item in self.items:
             self.items.move_to_end(item)  # Mark as recently used
@@ -29,10 +35,14 @@ class LRU(CachePolicy):
         return -1, True
 
 class RR(CachePolicy):
-    def __init__(self, size: int):
-        super().__init__(size)
+    def __init__(self):
+        super().__init__()
         self.items = set()
 
+    def set_size(self, size: int) -> None:
+        self.items = set()
+        self.size = size
+            
     def log_access(self, item: int, position, distances) -> int:
         self.items.add(item)
         if len(self.items) > self.size:
@@ -42,11 +52,14 @@ class RR(CachePolicy):
         return -1, True
 
 class LFU(CachePolicy):
-    def __init__(self, size: int):
-        super().__init__(size)
+    def __init__(self):
+        super().__init__()
+
+    def set_size(self, size: int) -> None:
+        self.size = size
         self.items = set()
         self.freq = defaultdict(int)
-
+            
     def log_access(self, item: int, position, distances) -> int:
         if item in self.items:
             self.freq[item] += 1
@@ -65,10 +78,13 @@ class LFU(CachePolicy):
         return -1, True
 
 class FIFO(CachePolicy):
-    def __init__(self, size: int):
-        super().__init__(size)
-        self.items = deque()
+    def __init__(self):
+        super().__init__()
 
+    def set_size(self, size: int) -> None:
+        self.size = size
+        self.items = deque()
+            
     def log_access(self, item: int, position, distances) -> int:
         if item not in self.items:
             if len(self.items) >= self.size:
@@ -78,16 +94,56 @@ class FIFO(CachePolicy):
             self.items.append(item)
         return -1, True
 
+from scipy.spatial import distance_matrix
+
+class OPT(CachePolicy):
+    def __init__(self, embeds, same_embed_distance):
+        super().__init__()
+        distances = distance_matrix(embeds, embeds)
+        n = embeds.shape[0]
+        self.embeds_next_hit = np.full(n, -1, dtype=int)
+        for i in range(n):
+            row_slice = distances[i, i+1:]
+            indices = np.where(row_slice < same_embed_distance)[0]
+            if indices.size > 0:
+                first_match = indices[0]
+                j = i + 1 + first_match
+                self.embeds_next_hit[i] = j
+            else:
+                self.embeds_next_hit[i] = -1
+
+    def set_size(self, size: int) -> None:
+        self.items = {}
+        self.size = size
+        self.embed_index = 0
+            
+    def log_access(self, item: int, position, distances) -> int:
+        item_next_hit = self.embeds_next_hit[self.embed_index]
+        self.embed_index += 1
+        if len(self.items) < self.size or item in self.items:
+            self.items[item] = item_next_hit
+            return -1, True
+        removed_item = min(self.items, key=self.items.get)
+        removed_item_next_hit = self.items[removed_item]
+        if removed_item_next_hit == -1 or removed_item_next_hit > item_next_hit:
+            self.items.pop(removed_item)
+            self.items[item] = item_next_hit
+            return removed_item, True
+        return -1, False
+
 class DensityBased(CachePolicy):
-    def __init__(self, size: int, cell_size = 0.707 * 1/384):
-        super().__init__(size)
+    def __init__(self, cell_size = 0.707 * 1/384):
+        super().__init__()
+        self.cell_size = cell_size
+
+    def set_size(self, size: int) -> None:
+        self.size = size
         self.items = dict()
         self.densities = {}
         self.items_counts = {}
         self.cache_hits = defaultdict(int)
         self.cache_misses = defaultdict(int)
-        self.cell_size = cell_size
-
+            
     def get_key(self, position):
         return tuple(np.round(position / self.cell_size).astype(int))
 
@@ -162,12 +218,15 @@ class ProbMisses(DensityBased):
         return removed_item
 
 class ProximityScore(CachePolicy):
-    def __init__(self, size: int):
-        super().__init__(size)
-        self.items = dict()
-        self.neigh_distance = 0.707
-        self.decay = 0.0
+    def __init__(self, neigh_distance: float, decay: float):
+        super().__init__()
+        self.neigh_distance = neigh_distance
+        self.decay = decay
 
+    def set_size(self, size: int) -> None:
+        self.size = size
+        self.items = dict()
+            
     def get_proximity_score(self, distances):
         sum_distance = sum(d for d in distances if d < self.neigh_distance)
         if sum_distance == 0:
