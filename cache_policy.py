@@ -101,16 +101,12 @@ class OPT(CachePolicy):
         super().__init__()
         distances = distance_matrix(embeds, embeds)
         n = embeds.shape[0]
-        self.embeds_next_hit = np.full(n, -1, dtype=int)
+        self.embeds_count_future_hits = np.full(n, -1, dtype=int)
         for i in range(n):
             row_slice = distances[i, i+1:]
-            indices = np.where(row_slice < same_embed_distance)[0]
-            if indices.size > 0:
-                first_match = indices[0]
-                j = i + 1 + first_match
-                self.embeds_next_hit[i] = j
-            else:
-                self.embeds_next_hit[i] = -1
+            indices_match = np.where(row_slice < same_embed_distance)
+            count_matches = len(indices_match)
+            self.embeds_count_future_hits[i] = count_matches
 
     def set_size(self, size: int) -> None:
         self.items = {}
@@ -118,16 +114,16 @@ class OPT(CachePolicy):
         self.embed_index = 0
             
     def log_access(self, item: int, position, distances) -> int:
-        item_next_hit = self.embeds_next_hit[self.embed_index]
+        item_future_hits = self.embeds_count_future_hits[self.embed_index]
         self.embed_index += 1
         if len(self.items) < self.size or item in self.items:
-            self.items[item] = item_next_hit
+            self.items[item] = item_future_hits
             return -1, True
         removed_item = min(self.items, key=self.items.get)
-        removed_item_next_hit = self.items[removed_item]
-        if removed_item_next_hit == -1 or removed_item_next_hit > item_next_hit:
+        removed_item_future_hits = self.items[removed_item]
+        if removed_item_future_hits > item_future_hits:
             self.items.pop(removed_item)
-            self.items[item] = item_next_hit
+            self.items[item] = item_future_hits
             return removed_item, True
         return -1, False
 
