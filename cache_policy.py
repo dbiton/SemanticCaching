@@ -101,11 +101,11 @@ class OPT(CachePolicy):
         super().__init__()
         distances = distance_matrix(embeds, embeds)
         n = embeds.shape[0]
-        self.embeds_count_future_hits = np.full(n, -1, dtype=int)
+        self.embeds_count_future_hits = np.full(n, 0, dtype=int)
+        cache_hits = (distances < same_embed_distance).astype(int)
         for i in range(n):
-            row_slice = distances[i, i+1:]
-            indices_match = np.where(row_slice < same_embed_distance)
-            count_matches = len(indices_match)
+            row_slice = cache_hits[i, i+1:]
+            count_matches = sum(row_slice)
             self.embeds_count_future_hits[i] = count_matches
 
     def set_size(self, size: int) -> None:
@@ -121,7 +121,7 @@ class OPT(CachePolicy):
             return -1, True
         removed_item = min(self.items, key=self.items.get)
         removed_item_future_hits = self.items[removed_item]
-        if removed_item_future_hits > item_future_hits:
+        if removed_item_future_hits < item_future_hits:
             self.items.pop(removed_item)
             self.items[item] = item_future_hits
             return removed_item, True
