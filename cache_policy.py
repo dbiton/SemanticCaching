@@ -11,7 +11,7 @@ class CachePolicy:
     def set_size(self, size: int) -> None:
         self.size = size
     
-    def log_access(self, item: int, position, distances) -> Tuple[int, bool]:
+    def log_access(self, item: int, item_position, distances) -> Tuple[int, bool]:
         return -1
 
     def count_items(self):
@@ -99,31 +99,38 @@ from scipy.spatial import distance_matrix
 class OPT(CachePolicy):
     def __init__(self, embeds, same_embed_distance):
         super().__init__()
-        distances = distance_matrix(embeds, embeds)
-        n = embeds.shape[0]
-        self.embeds_count_future_hits = np.full(n, 0, dtype=int)
-        cache_hits = (distances < same_embed_distance).astype(int)
-        for i in range(n):
-            row_slice = cache_hits[i, i+1:]
-            count_matches = sum(row_slice)
-            self.embeds_count_future_hits[i] = count_matches
+        self.embeds_distances = distance_matrix(embeds, embeds)
+        self.embeds_covers = (self.embeds_distances < same_embed_distance).astype(int)
+        tri_l = np.tril_indices_from(self.embeds_covers)
+        self.embeds_covers[tri_l] = 0
 
     def set_size(self, size: int) -> None:
         self.items = {}
         self.size = size
         self.embed_index = 0
             
-    def log_access(self, item: int, position, distances) -> int:
-        item_future_hits = self.embeds_count_future_hits[self.embed_index]
+    def log_access(self,  item: int, position, distances) -> int:
+        curr_embed_index = self.embed_index
+        next_embed_index = curr_embed_index + 1
         self.embed_index += 1
-        if len(self.items) < self.size or item in self.items:
-            self.items[item] = item_future_hits
+        if len(self.items) < self.size:
+            self.items[item] = curr_embed_index
             return -1, True
-        removed_item = min(self.items, key=self.items.get)
-        removed_item_future_hits = self.items[removed_item]
-        if removed_item_future_hits < item_future_hits:
+        scores = {}
+        
+        stored_embeds_indices = list(self.items.values()) + [curr_embed_index]
+        stored_embeds_covers = self.embeds_covers[stored_embeds_indices]
+        count_covers = stored_embeds_covers.sum(axis=0) # number of covers by stored embeds for each future embedding
+        col_mask = (count_covers == 1)[next_embed_index:] # every future embedding with a single cover by a stored embedding 
+        row_portion = self.embeds_covers[:, next_embed_index:] == 1
+        scores_array = np.sum(row_portion & col_mask, axis=1)
+        scores = {e: scores_array[e] for e in stored_embeds_indices}
+        
+        removed_item = min(scores, key=scores.get)
+        removed_item_future_hits = scores[removed_item]
+        if removed_item_future_hits < scores[curr_embed_index]:
             self.items.pop(removed_item)
-            self.items[item] = item_future_hits
+            self.items[item] = curr_embed_index
             return removed_item, True
         return -1, False
 
