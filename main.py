@@ -1,5 +1,7 @@
 import json
+import pickle
 from random import sample
+import time
 from typing import Dict, List
 import faiss
 from matplotlib import pyplot as plt
@@ -68,34 +70,24 @@ def generate_embeds(mean, std_dev, dim, len):
     return [np.random.normal(mean, std_dev, dim) for _ in range(len)]
 
 def load_embeds():
-    with open("TitlesEmbeddings.json", "r") as f:
-        embeds = json.load(f)
-        return np.stack([np.array(e[1]) for e in embeds], axis=0)
+    with open("embeds_so.pkl", "rb") as f:
+        embeds = pickle.load(f)
+        return embeds
 
 def main():
-    '''
-    strings_origin, strings_similar = load_data_long(EMBEDS_COUNT)
-    embeds = embed_strings(strings_origin + strings_similar)
-    embeds_origin = embeds[:len(strings_origin)]
-    embeds_similar = embeds[len(strings_origin):]
-    
-    l2_distances = np.lina5lg.norm(embeds_origin - embeds_similar, axis=1)
-    same_embed_distance = np.max(l2_distances)
-    '''
     print("loading embeds...")
-    num_samples = 4000
-    strings_origin, strings_similar = load_data_long(num_samples)
-    embeds = embed_strings(strings_origin + strings_similar)
+    num_samples = 5000
+    embeds = load_embeds()
     sampled_indices = np.random.choice(embeds.shape[0], size=num_samples, replace=False)
     embeds = embeds[sampled_indices]
     print("loaded!")
     dim = 384
-    same_embed_distance = 0.5
-    similar_embed_distance = 0.707
+    same_embed_distance = 0.707
+    similar_embed_distance = 1.0
     
     policies = {
-        "OPT": OPT(embeds, same_embed_distance),
-        "ProximityScore": ProximityScore(similar_embed_distance, 0.5),
+        # "VOPT": OPT(embeds, same_embed_distance),
+        "ProximityScore": ProximityScore(1, 0.5),
         #"ProbMisses": ProbMisses,
         #"ProbMinCounter": ProbMinCounter,
         #"ProbMinDensity": ProbMinDensity,
@@ -112,27 +104,28 @@ def main():
     
     for policy_name, policy in policies.items():
         print(policy_name)
-        for cache_size in range(200, 2000, 200):
+        for cache_size in range(num_samples // 10, num_samples, num_samples // 10):
             index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
             policy.set_size(cache_size)
             cache_hits = 0
+            t0 = time.time()
             for i_embed, embed in enumerate(embeds):
                 policy_size = policy.count_items()
                 assert(index.ntotal == policy_size)
-                embed_as_array = embed.reshape(1, dim)
-                distances, neighbors = index.search(embed_as_array, max(1,index.ntotal))
-                if neighbors[0][0] != -1 and distances[0][0] <= same_embed_distance:
+                embed_reshaped = embed.reshape(1, -1)
+                distances, neighbors = index.search(embed_reshaped, max(1, min(256, index.ntotal)))
+                i_embed_cache_hit = neighbors[0][0]
+                embed_cache_hit = embeds[i_embed_cache_hit] if i_embed_cache_hit != -1 else None
+                id_remove, add_id = policy.log_access(i_embed, embed, list(distances[0]))
+                if i_embed_cache_hit != -1 and distances[0][0] <= same_embed_distance:
                     cache_hits += 1
-                    neigh_embed = embeds[neighbors[0][0]]
-                    id_remove, _ = policy.log_access(neighbors[0][0], neigh_embed, list(distances[0]))
-                else:
-                    id_remove, add_id = policy.log_access(i_embed, embed, list(distances[0]))
-                    if add_id:
-                        index.add_with_ids(embed_as_array, np.array([i_embed]))
+                if add_id:
+                    index.add_with_ids(embed_reshaped, np.array([i_embed]))
                 if id_remove != -1:
                     index.remove_ids(np.array([id_remove]))
             iter_results = {
-                "Hit Ratio": cache_hits / len(embeds)
+                "Hit Ratio": cache_hits / len(embeds),
+                "Runtime": time.time() - t0
             }
             for prop_name, prop in iter_results.items():
                 if prop_name not in results:
