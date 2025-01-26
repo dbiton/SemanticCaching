@@ -77,40 +77,35 @@ class OPT(Cache):
         self.embeds_covers = (self.embeds_distances < same_embed_distance).astype(int)
         tri_l = np.tril_indices_from(self.embeds_covers)
         self.embeds_covers[tri_l] = 0
-        self.embed_index = None
 
     def initialize(self, capacity: int, index):
-        self.items = {}
-        self.embed_index = 0
+        self.items = set()
         super().initialize(capacity, index)
             
     def request(self, embed, embed_id) -> int:
-        curr_embed_id = self.embed_index
-        next_embed_id = curr_embed_id + 1
-        self.embed_index += 1
         closest_embed_id, closest_embed_distance = self.get_closest_stored_embed(embed)
+        cache_hit = False
         if closest_embed_id in self.items and closest_embed_distance < self.same_embed_distance:
-            return True
+            cache_hit = True
 
         if self.size() < self.capacity:
-            self.items[embed_id] = curr_embed_id
+            self.items.add(embed_id)
             self.index.add_with_ids(embed, np.array([embed_id]))
-            return False
         
         scores = {}
-        stored_embeds_indices = list(self.items.values()) + [curr_embed_id]
+        stored_embeds_indices = list(self.items) + [embed_id]
         stored_embeds_covers = self.embeds_covers[stored_embeds_indices]
         count_covers = stored_embeds_covers.sum(axis=0) # number of covers by stored embeds for each future embedding
-        col_mask = (count_covers == 1)[next_embed_id:] # every future embedding with a single cover by a stored embedding 
-        row_portion = self.embeds_covers[:, next_embed_id:] == 1
+        col_mask = (count_covers == 1)[embed_id:] # every future embedding with a single cover by a stored embedding 
+        row_portion = self.embeds_covers[:, embed_id:] == 1
         scores_array = np.sum(row_portion & col_mask, axis=1)
         scores = {e: scores_array[e] for e in stored_embeds_indices}
         
         removed_embed_id = min(scores, key=scores.get)
         removed_item_future_hits = scores[removed_embed_id]
-        if removed_item_future_hits < scores[curr_embed_id]:
-            self.items.pop(removed_embed_id)
+        if removed_item_future_hits < scores[embed_id]:
+            self.items.remove(removed_embed_id)
             self.index.remove_ids(np.array([removed_embed_id]))
-            self.items[embed_id] = curr_embed_id
+            self.items.add(embed_id)
             self.index.add_with_ids(embed, np.array([embed_id]))
-        return False
+        return cache_hit
