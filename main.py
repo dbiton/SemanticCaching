@@ -8,7 +8,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
-from cache_policy import *
+from cache import *
 
 has_gpu = False
 
@@ -76,7 +76,7 @@ def load_embeds():
 
 def main():
     print("loading embeds...")
-    num_samples = 5000
+    num_samples = 1000
     embeds = load_embeds()
     sampled_indices = np.random.choice(embeds.shape[0], size=num_samples, replace=False)
     embeds = embeds[sampled_indices]
@@ -85,44 +85,33 @@ def main():
     same_embed_distance = 0.707
     similar_embed_distance = 1.0
     
-    policies = {
-        # "VOPT": OPT(embeds, same_embed_distance),
-        "ProximityScore": ProximityScore(1, 0.5),
+    caches = {
+        "OPT": OPT(same_embed_distance, embeds),
+        # "ProximityScore": ProximityScore(1, 0.5),
         #"ProbMisses": ProbMisses,
         #"ProbMinCounter": ProbMinCounter,
         #"ProbMinDensity": ProbMinDensity,
-        "MinCounter": MinCounter(similar_embed_distance / 384),
+        # "MinCounter": MinCounter(similar_embed_distance / 384),
         #"MinDensity": MinDensity,
         #"MaxDensity": MaxDensity,
         #"RR": RR,
-        #"LRU": LRU,
-        "LFU": LFU(),
+        # "LRU": LRU(same_embed_distance),
+        "LFU": LFU(same_embed_distance),
         # "FIFO": FIFO,
     }
     
     results = {}
     
-    for policy_name, policy in policies.items():
-        print(policy_name)
+    for cache_name, cache in caches.items():
+        print(cache_name)
         for cache_size in range(num_samples // 10, num_samples, num_samples // 10):
             index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
-            policy.set_size(cache_size)
+            cache.initialize(cache_size, index)
             cache_hits = 0
             t0 = time.time()
             for i_embed, embed in enumerate(embeds):
-                policy_size = policy.count_items()
-                assert(index.ntotal == policy_size)
-                embed_reshaped = embed.reshape(1, -1)
-                distances, neighbors = index.search(embed_reshaped, max(1, min(256, index.ntotal)))
-                i_embed_cache_hit = neighbors[0][0]
-                embed_cache_hit = embeds[i_embed_cache_hit] if i_embed_cache_hit != -1 else None
-                id_remove, add_id = policy.log_access(i_embed, embed, list(distances[0]))
-                if i_embed_cache_hit != -1 and distances[0][0] <= same_embed_distance:
+                if cache.request(embed.reshape(1, -1), i_embed):
                     cache_hits += 1
-                if add_id:
-                    index.add_with_ids(embed_reshaped, np.array([i_embed]))
-                if id_remove != -1:
-                    index.remove_ids(np.array([id_remove]))
             iter_results = {
                 "Hit Ratio": cache_hits / len(embeds),
                 "Runtime": time.time() - t0
@@ -130,10 +119,10 @@ def main():
             for prop_name, prop in iter_results.items():
                 if prop_name not in results:
                     results[prop_name] = {}
-                if policy_name not in results[prop_name]:
-                    results[prop_name][policy_name] = {}
-                results[prop_name][policy_name][cache_size] = prop
-            print(policy_name, iter_results)
+                if cache_name not in results[prop_name]:
+                    results[prop_name][cache_name] = {}
+                results[prop_name][cache_name][cache_size] = prop
+            print(cache_name, iter_results)
     plot(results)
 
 if __name__=="__main__":
