@@ -39,7 +39,7 @@ def embed_titles(n = -1):
     with open("TitlesEmbeddings.json", "w") as f:
         json.dump(list(zip(titles_strings, titles_embeddings)), f)
     
-def plot(results):
+def plot(dataset_name, results):
     """
     Plots the results of dimensionality reduction experiments.
 
@@ -63,67 +63,73 @@ def plot(results):
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
-        plt.savefig(f"{prop_name}.png")
+        plt.savefig(f"{dataset_name}_{prop_name}.png")
 
 def generate_embeds(mean, std_dev, dim, len):    
     np.random.seed(0)
     return [np.random.normal(mean, std_dev, dim) for _ in range(len)]
 
 def load_embeds():
-    with open("embeds_so.pkl", "rb") as f:
-        embeds = pickle.load(f)
-        return embeds
+    filenames = {
+        "StackOverflow": "embeds_so.pkl",
+        "Bing": "embeds_bing.pkl",
+        "WildChat": "embeds_chat.pkl"
+    }
+    for dataset_name, filename in filenames.items():
+        with open(filename, "rb") as f:
+            embeds = pickle.load(f)
+            yield dataset_name, embeds
 
 def main():
-    print("loading embeds...")
-    num_samples = 1000
-    embeds = load_embeds()
-    sampled_indices = np.random.choice(embeds.shape[0], size=num_samples, replace=False)
-    embeds = embeds[sampled_indices]
-    print("loaded!")
-    dim = 384
-    same_embed_distance = 0.707
-    similar_embed_distance = 1.0
-    
-    caches = {
-        "OPT": OPT(same_embed_distance, embeds),
-        # "ProximityScore": ProximityScore(1, 0.5),
-        #"ProbMisses": ProbMisses,
-        #"ProbMinCounter": ProbMinCounter,
-        #"ProbMinDensity": ProbMinDensity,
-        # "MinCounter": MinCounter(similar_embed_distance / 384),
-        #"MinDensity": MinDensity,
-        #"MaxDensity": MaxDensity,
-        #"RR": RR,
-        # "LRU": LRU(same_embed_distance),
-        "LFU": LFU(same_embed_distance),
-        # "FIFO": FIFO,
-    }
-    
-    results = {}
-    
-    for cache_name, cache in caches.items():
-        print(cache_name)
-        for cache_size in range(num_samples // 10, num_samples, num_samples // 10):
-            index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
-            cache.initialize(cache_size, index)
-            cache_hits = 0
-            t0 = time.time()
-            for i_embed, embed in enumerate(embeds):
-                if cache.request(embed.reshape(1, -1), i_embed):
-                    cache_hits += 1
-            iter_results = {
-                "Hit Ratio": cache_hits / len(embeds),
-                "Runtime": time.time() - t0
-            }
-            for prop_name, prop in iter_results.items():
-                if prop_name not in results:
-                    results[prop_name] = {}
-                if cache_name not in results[prop_name]:
-                    results[prop_name][cache_name] = {}
-                results[prop_name][cache_name][cache_size] = prop
-            print(cache_name, iter_results)
-    plot(results)
+    num_samples = 10000
+    for dataset_name, embeds in load_embeds():
+        print(f"loaded {dataset_name}...")
+        sampled_indices = np.random.choice(embeds.shape[0], size=num_samples, replace=False)
+        embeds = embeds[sampled_indices]
+        print("loaded!")
+        dim = 384
+        same_embed_distance = 0.707
+        similar_embed_distance = 1.0
+        
+        caches = {
+            # "OPT": OPT(same_embed_distance, embeds),
+            # "ProximityScore": ProximityScore(1, 0.5),
+            #"ProbMisses": ProbMisses,
+            #"ProbMinCounter": ProbMinCounter,
+            #"ProbMinDensity": ProbMinDensity,
+            # "MinCounter": MinCounter(similar_embed_distance / 384),
+            #"MinDensity": MinDensity,
+            #"MaxDensity": MaxDensity,
+            #"RR": RR,
+            "LRU": LRU(same_embed_distance),
+            "LFU": LFU(same_embed_distance),
+            # "FIFO": FIFO,
+        }
+        
+        results = {}
+        
+        for cache_name, cache in caches.items():
+            print(cache_name)
+            for cache_size in range(num_samples // 10, num_samples, num_samples // 10):
+                index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
+                cache.initialize(cache_size, index)
+                cache_hits = 0
+                t0 = time.time()
+                for i_embed, embed in enumerate(embeds):
+                    if cache.request(embed.reshape(1, -1), i_embed):
+                        cache_hits += 1
+                iter_results = {
+                    "Hit Ratio": cache_hits / len(embeds),
+                    "Runtime": time.time() - t0
+                }
+                for prop_name, prop in iter_results.items():
+                    if prop_name not in results:
+                        results[prop_name] = {}
+                    if cache_name not in results[prop_name]:
+                        results[prop_name][cache_name] = {}
+                    results[prop_name][cache_name][cache_size] = prop
+                print(cache_name, iter_results)
+        plot(dataset_name, results)
 
 if __name__=="__main__":
     main()
