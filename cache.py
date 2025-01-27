@@ -36,16 +36,17 @@ class LFU(Cache):
             
     def request(self, embed, embed_id):
         closest_embed_id, closest_embed_distance = self.get_closest_stored_embed(embed)
+        cache_hit = False
         if closest_embed_id in self.items and closest_embed_distance < self.same_embed_distance:
             self.items[closest_embed_id] += 1
-            return True
+            cache_hit = True
         if self.size() >= self.capacity:
             removed_embed_id = min(self.items, key=self.items.get)
             del self.items[removed_embed_id]
             self.index.remove_ids(np.array([removed_embed_id]))
         self.items[embed_id] = 1
         self.index.add_with_ids(embed, np.array([embed_id]))
-        return False
+        return cache_hit
 
 class LRU(Cache):
     def __init__(self, same_embed_distance):
@@ -59,16 +60,17 @@ class LRU(Cache):
     def request(self, embed, embed_id):
         self.time_index += 1
         closest_embed_id, closest_embed_distance = self.get_closest_stored_embed(embed)
+        cache_hit = False
         if closest_embed_id in self.items and closest_embed_distance < self.same_embed_distance:
             self.items[closest_embed_id] = self.time_index
-            return True
+            cache_hit = True
         if self.size() >= self.capacity:
             removed_embed_id = min(self.items, key=self.items.get)
             del self.items[removed_embed_id]
             self.index.remove_ids(np.array([removed_embed_id]))
         self.items[embed_id] = self.time_index
         self.index.add_with_ids(embed, np.array([embed_id]))
-        return False
+        return cache_hit
 
 class OPT(Cache):
     def __init__(self, same_embed_distance, embeds):
@@ -91,6 +93,7 @@ class OPT(Cache):
         if self.size() < self.capacity:
             self.items.add(embed_id)
             self.index.add_with_ids(embed, np.array([embed_id]))
+            return cache_hit
         
         scores = {}
         stored_embeds_indices = list(self.items) + [embed_id]
@@ -102,6 +105,44 @@ class OPT(Cache):
         scores = {e: scores_array[e] for e in stored_embeds_indices}
         
         removed_embed_id = min(scores, key=scores.get)
+        removed_item_future_hits = scores[removed_embed_id]
+        if removed_item_future_hits < scores[embed_id]:
+            self.items.remove(removed_embed_id)
+            self.index.remove_ids(np.array([removed_embed_id]))
+            self.items.add(embed_id)
+            self.index.add_with_ids(embed, np.array([embed_id]))
+        return cache_hit
+
+class OPT2(Cache):
+    def __init__(self, same_embed_distance, embeds):
+        super().__init__(same_embed_distance)
+        self.embeds_distances = distance_matrix(embeds, embeds)
+        self.embeds_covers = (self.embeds_distances < same_embed_distance).astype(int)
+        tri_l = np.tril_indices_from(self.embeds_covers)
+        self.embeds_covers[tri_l] = 0
+
+    def initialize(self, capacity: int, index):
+        self.items = set()
+        super().initialize(capacity, index)
+            
+    def request(self, embed, embed_id) -> int:
+        closest_embed_id, closest_embed_distance = self.get_closest_stored_embed(embed)
+        cache_hit = False
+        if closest_embed_id in self.items and closest_embed_distance < self.same_embed_distance:
+            cache_hit = True
+
+        if self.size() < self.capacity:
+            self.items.add(embed_id)
+            self.index.add_with_ids(embed, np.array([embed_id]))
+            return cache_hit
+        
+        relevant_embeds_indices = sorted(list(self.items) + [embed_id])
+        stored_embeds_covers = self.embeds_covers[relevant_embeds_indices]
+        stored_embeds_cache_hits = [np.flatnonzero(row) for row in stored_embeds_covers]
+        stored_embeds_next_cache_hit = [v[0] if len(v) > 0 else float('inf') for v in stored_embeds_cache_hits]
+        scores = {e: stored_embeds_next_cache_hit[i_e] for (i_e, e) in enumerate(relevant_embeds_indices)}
+        
+        removed_embed_id = max(scores, key=scores.get)
         removed_item_future_hits = scores[removed_embed_id]
         if removed_item_future_hits < scores[embed_id]:
             self.items.remove(removed_embed_id)
