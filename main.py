@@ -1,3 +1,5 @@
+from concurrent.futures import ProcessPoolExecutor
+import copy
 import json
 import pickle
 from random import sample
@@ -71,33 +73,49 @@ def generate_embeds(mean, std_dev, dim, len):
 
 def load_embeds():
     filenames = {
-        "StackOverflow": "embeds_so.pkl",
         "Bing": "embeds_bing.pkl",
-        "WildChat": "embeds_chat.pkl"
     }
     for dataset_name, filename in filenames.items():
         with open(filename, "rb") as f:
             embeds = pickle.load(f)
             yield dataset_name, embeds
 
+def process(args):
+    (cache, cache_size, dim, embeds, cache_name) = args
+    index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
+    cache.initialize(cache_size, index)
+    cache_hits = 0
+    t0 = time.time()
+    for i_embed, embed in enumerate(embeds):
+        if cache.request(embed.reshape(1, -1), i_embed):
+            cache_hits += 1
+    iter_results = {
+        "Cache Name": cache_name,
+        "Hit Ratio": cache_hits / len(embeds),
+        "Runtime": time.time() - t0,
+        "Cache Size": cache_size
+    }
+    return iter_results
+
 def main():
-    num_samples = 10000
+    num_samples = 1000
     for dataset_name, embeds in load_embeds():
         print(f"loaded {dataset_name}...")
         sampled_indices = np.random.choice(embeds.shape[0], size=num_samples, replace=False)
         embeds = embeds[sampled_indices]
         print("loaded!")
         dim = 384
-        same_embed_distance = 0.707
+        same_embed_distance = 0.5
         similar_embed_distance = 1.0
         
         caches = {
-            # "OPT": OPT(same_embed_distance, embeds),
-            # "ProximityScore": ProximityScore(1, 0.5),
+            #"OPT2": OPT2(same_embed_distance, embeds),
+            "OPT": OPT(same_embed_distance, embeds),
+            #"ProximityScore": ProximityScore(1, 0.5),
             #"ProbMisses": ProbMisses,
             #"ProbMinCounter": ProbMinCounter,
             #"ProbMinDensity": ProbMinDensity,
-            # "MinCounter": MinCounter(similar_embed_distance / 384),
+            #"MinCounter": MinCounter(similar_embed_distance / 384),
             #"MinDensity": MinDensity,
             #"MaxDensity": MaxDensity,
             #"RR": RR,
@@ -108,27 +126,25 @@ def main():
         
         results = {}
         
-        for cache_name, cache in caches.items():
-            print(cache_name)
-            for cache_size in range(num_samples // 10, num_samples, num_samples // 10):
-                index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
-                cache.initialize(cache_size, index)
-                cache_hits = 0
-                t0 = time.time()
-                for i_embed, embed in enumerate(embeds):
-                    if cache.request(embed.reshape(1, -1), i_embed):
-                        cache_hits += 1
-                iter_results = {
-                    "Hit Ratio": cache_hits / len(embeds),
-                    "Runtime": time.time() - t0
-                }
-                for prop_name, prop in iter_results.items():
-                    if prop_name not in results:
-                        results[prop_name] = {}
-                    if cache_name not in results[prop_name]:
-                        results[prop_name][cache_name] = {}
-                    results[prop_name][cache_name][cache_size] = prop
-                print(cache_name, iter_results)
+        with ProcessPoolExecutor() as executor:
+            args = []
+            for cache_name, cache in caches.items():
+                for cache_size in range(num_samples // 10, num_samples + num_samples // 10, num_samples // 10):
+                    args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name))
+            raw_results = executor.map(process, args)
+
+        for iter_results in raw_results:
+            for prop_name, prop in iter_results.items():
+                cache_name = iter_results['Cache Name']
+                cache_size = iter_results['Cache Size']
+                if prop_name == 'Cache Name':
+                    continue
+                if prop_name not in results:
+                    results[prop_name] = {}
+                if cache_name not in results[prop_name]:
+                    results[prop_name][cache_name] = {}
+                results[prop_name][cache_name][cache_size] = prop
+            print(cache_name, iter_results)
         plot(dataset_name, results)
 
 if __name__=="__main__":
