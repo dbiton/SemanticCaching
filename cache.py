@@ -26,6 +26,16 @@ class Cache:
     def size(self):
         return len(self.items)
 
+class Dummy(Cache):
+    def __init__(self, same_embed_distance):
+        super().__init__(same_embed_distance)
+
+    def initialize(self, capacity: int, index):
+        super().initialize(capacity, index)
+            
+    def request(self, embed, embed_id):
+        return False, embed_id
+
 class LFU(Cache):
     def __init__(self, same_embed_distance):
         super().__init__(same_embed_distance)
@@ -37,16 +47,18 @@ class LFU(Cache):
     def request(self, embed, embed_id):
         closest_embed_id, closest_embed_distance = self.get_closest_stored_embed(embed)
         cache_hit = False
+        evicted_item = None
         if closest_embed_id in self.items and closest_embed_distance < self.same_embed_distance:
             self.items[closest_embed_id] += 1
             cache_hit = True
         if self.size() >= self.capacity:
             removed_embed_id = min(self.items, key=self.items.get)
             del self.items[removed_embed_id]
+            evicted_item = removed_embed_id
             self.index.remove_ids(np.array([removed_embed_id]))
         self.items[embed_id] = 1
         self.index.add_with_ids(embed, np.array([embed_id]))
-        return cache_hit
+        return cache_hit, evicted_item
 
 class LRU(Cache):
     def __init__(self, same_embed_distance):
@@ -61,16 +73,18 @@ class LRU(Cache):
         self.time_index += 1
         closest_embed_id, closest_embed_distance = self.get_closest_stored_embed(embed)
         cache_hit = False
+        evicted_item = None
         if closest_embed_id in self.items and closest_embed_distance < self.same_embed_distance:
             self.items[closest_embed_id] = self.time_index
             cache_hit = True
         if self.size() >= self.capacity:
             removed_embed_id = min(self.items, key=self.items.get)
             del self.items[removed_embed_id]
+            evicted_item = removed_embed_id
             self.index.remove_ids(np.array([removed_embed_id]))
         self.items[embed_id] = self.time_index
         self.index.add_with_ids(embed, np.array([embed_id]))
-        return cache_hit
+        return cache_hit, evicted_item
 
 class OPT(Cache):
     def __init__(self, same_embed_distance, embeds):
@@ -87,13 +101,14 @@ class OPT(Cache):
     def request(self, embed, embed_id) -> int:
         closest_embed_id, closest_embed_distance = self.get_closest_stored_embed(embed)
         cache_hit = False
+        evicted_item = None
         if closest_embed_id in self.items and closest_embed_distance < self.same_embed_distance:
             cache_hit = True
 
         if self.size() < self.capacity:
             self.items.add(embed_id)
             self.index.add_with_ids(embed, np.array([embed_id]))
-            return cache_hit
+            return cache_hit, evicted_item
         
         scores = {}
         stored_embeds_indices = list(self.items) + [embed_id]
@@ -111,7 +126,8 @@ class OPT(Cache):
             self.index.remove_ids(np.array([removed_embed_id]))
             self.items.add(embed_id)
             self.index.add_with_ids(embed, np.array([embed_id]))
-        return cache_hit
+            evicted_item = removed_embed_id
+        return cache_hit, evicted_item
 
 class OPT2(Cache):
     def __init__(self, same_embed_distance, embeds):
