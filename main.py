@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from cache import *
+from denstream_cache import *
 
 has_gpu = False
 
@@ -85,26 +86,26 @@ def process(args):
     index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
     cache.initialize(cache_size, index)
     cache_hits = 0
-    l2_cache_hits = 0
+    #l2_cache_hits = 0
     t0 = time.time()
-    index_unlimited = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
+    #index_unlimited = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
     for i_embed, embed in enumerate(embeds):
         cache_hit, evicted_embed_id = cache.request(embed.reshape(1, -1), i_embed)
         if cache_hit:
             cache_hits += 1
-            l2_cache_hits += 1
+        '''    l2_cache_hits += 1
         else:
             distances, neighbors = index_unlimited.search(embed.reshape(1, -1), 1)
             if distances[0][0] <= cache.same_embed_distance:
                 l2_cache_hits += 1
         if evicted_embed_id:
             evicted_embed = embeds[evicted_embed_id]
-            index_unlimited.add_with_ids(evicted_embed.reshape(1, -1), np.array([evicted_embed_id]))
+            index_unlimited.add_with_ids(evicted_embed.reshape(1, -1), np.array([evicted_embed_id]))'''
     # once something is evicted from the small cache, we put it into the larger unlimited cache
     iter_results = {
         "Cache Name": cache_name,
         "Hit Ratio": cache_hits / len(embeds),
-        "Hit Ratio W L2": l2_cache_hits / len(embeds),
+        # "Hit Ratio W L2": l2_cache_hits / len(embeds),
         "Runtime": time.time() - t0,
         "Cache Size": cache_size
     }
@@ -123,7 +124,7 @@ def main():
         
         caches = {
             #"OPT2": OPT2(same_embed_distance, embeds),
-            "Dummy": Dummy(same_embed_distance),
+            #"Dummy": Dummy(same_embed_distance),
             #"OPT": OPT(same_embed_distance, embeds),
             #"ProximityScore": ProximityScore(1, 0.5),
             #"ProbMisses": ProbMisses,
@@ -133,8 +134,9 @@ def main():
             #"MinDensity": MinDensity,
             #"MaxDensity": MaxDensity,
             #"RR": RR,
-            "LRU": LRU(same_embed_distance),
+            #"LRU": LRU(same_embed_distance),
             "LFU": LFU(same_embed_distance),
+            "DS": DenStreamCache(same_embed_distance),
             # "FIFO": FIFO,
         }
         
@@ -143,9 +145,10 @@ def main():
         with ProcessPoolExecutor() as executor:
             args = []
             for cache_name, cache in caches.items():
-                for cache_size in range(num_samples // 10, num_samples + num_samples // 10, num_samples // 10):
+                for cache_size in range(num_samples // 10, int(num_samples * 1.2), num_samples // 10):
                     args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name))
             raw_results = executor.map(process, args)
+            # raw_results = [process(arg) for arg in args]
 
         for iter_results in raw_results:
             for prop_name, prop in iter_results.items():
