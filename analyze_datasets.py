@@ -26,25 +26,44 @@ def calculate_pairwise_statistics(embeddings):
     
     return cosine_sim_mean, cosine_sim_std, euclidean_dist_mean, euclidean_dist_std
 
-def plot_pca(embeds, fig_name):
+def plot_pca(embeds, fig_name, bins=100):
+    """Perform PCA to 2D, then plot a 2D histogram of the point density."""
     pca = PCA(n_components=2)
     X_pca = pca.fit_transform(embeds)
+
     plt.figure(figsize=(8, 6))
-    plt.scatter(X_pca[:, 0], X_pca[:, 1], c='blue', alpha=0.6)
+    # Plot 2D histogram
+    plt.hist2d(X_pca[:, 0], X_pca[:, 1], bins=bins, cmap='viridis')
+    
+    # Add a colorbar to show density scale
+    plt.colorbar(label='Point Count')
+    
     plt.xlabel('PCA Component 1')
     plt.ylabel('PCA Component 2')
+    plt.title('PCA with 2D Histogram')
     plt.tight_layout()
-    plt.savefig(fig_name)    
-    
-def plot_tsne(embeds, fig_name):
-    tsne = TSNE(n_components=2, perplexity=30, random_state=42)
+    plt.savefig(fig_name)
+    plt.close()
+
+
+def plot_tsne(embeds, fig_name, bins=100, perplexity=30):
+    """Perform t-SNE to 2D, then plot a 2D histogram of the point density."""
+    tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42)
     X_tsne = tsne.fit_transform(embeds)
+
     plt.figure(figsize=(8, 6))
-    plt.scatter(X_tsne[:, 0], X_tsne[:, 1], c='red', alpha=0.6)
+    # Plot 2D histogram
+    plt.hist2d(X_tsne[:, 0], X_tsne[:, 1], bins=bins, cmap='plasma')
+    
+    # Add a colorbar to show density scale
+    plt.colorbar(label='Point Count')
+    
     plt.xlabel('t-SNE Component 1')
     plt.ylabel('t-SNE Component 2')
+    plt.title('t-SNE with 2D Histogram')
     plt.tight_layout()
-    plt.savefig(fig_name)    
+    plt.savefig(fig_name)
+    plt.close()
 
 def calculate_entropy_of_principal_components(embeddings):
     """
@@ -73,11 +92,11 @@ for dataset_name, file_path in datasets_paths.items():
         embeds = pickle.load(f)
 
     # Use a subset of embeddings if needed
-    embeds = embeds[:1000]
-    
+    embeds = embeds[:50000]
+    print(dataset_name)
     plot_pca(embeds, f"{dataset_name}_pca.png")
     plot_tsne(embeds, f"{dataset_name}_tsne.png")
-    
+    continue
     # Calculate the pairwise statistics
     cs_mean, cs_std, ed_mean, ed_std = calculate_pairwise_statistics(embeds)
     
