@@ -1,5 +1,7 @@
 import pickle
+from matplotlib import pyplot as plt
 import numpy as np
+from sklearn.manifold import TSNE
 from sklearn.metrics.pairwise import cosine_similarity, pairwise_distances
 from sklearn.decomposition import PCA
 from scipy.stats import entropy
@@ -23,6 +25,26 @@ def calculate_pairwise_statistics(embeddings):
     euclidean_dist_std = np.std(euclidean_dist)
     
     return cosine_sim_mean, cosine_sim_std, euclidean_dist_mean, euclidean_dist_std
+
+def plot_pca(embeds, fig_name):
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(embeds)
+    plt.figure(figsize=(8, 6))
+    plt.scatter(X_pca[:, 0], X_pca[:, 1], c='blue', alpha=0.6)
+    plt.xlabel('PCA Component 1')
+    plt.ylabel('PCA Component 2')
+    plt.tight_layout()
+    plt.savefig(fig_name)    
+    
+def plot_tsne(embeds, fig_name):
+    tsne = TSNE(n_components=2, perplexity=30, random_state=42)
+    X_tsne = tsne.fit_transform(embeds)
+    plt.figure(figsize=(8, 6))
+    plt.scatter(X_tsne[:, 0], X_tsne[:, 1], c='red', alpha=0.6)
+    plt.xlabel('t-SNE Component 1')
+    plt.ylabel('t-SNE Component 2')
+    plt.tight_layout()
+    plt.savefig(fig_name)    
 
 def calculate_entropy_of_principal_components(embeddings):
     """
@@ -51,7 +73,10 @@ for dataset_name, file_path in datasets_paths.items():
         embeds = pickle.load(f)
 
     # Use a subset of embeddings if needed
-    embeds = embeds[:10000]
+    embeds = embeds[:1000]
+    
+    plot_pca(embeds, f"{dataset_name}_pca.png")
+    plot_tsne(embeds, f"{dataset_name}_tsne.png")
     
     # Calculate the pairwise statistics
     cs_mean, cs_std, ed_mean, ed_std = calculate_pairwise_statistics(embeds)
