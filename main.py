@@ -11,7 +11,8 @@ import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from cache import *
-from denstream_cache import *
+from cache_denstream import *
+from cache_kmeans import CacheKMeans
 
 has_gpu = False
 
@@ -112,7 +113,7 @@ def process(args):
     return iter_results
 
 def main():
-    num_samples = 1000
+    num_samples = 10000
     for dataset_name, embeds in load_embeds():
         print(f"loaded {dataset_name}...")
         sampled_indices = np.random.choice(embeds.shape[0], size=num_samples, replace=False)
@@ -133,19 +134,21 @@ def main():
             #"MinCounter": MinCounter(similar_embed_distance / 384),
             #"MinDensity": MinDensity,
             #"MaxDensity": MaxDensity,
-            #"RR": RR,
-            #"LRU": LRU(same_embed_distance),
+            "RR": RR(same_embed_distance),
+            "RAP": RAP(same_embed_distance),
+            "LRU": LRU(same_embed_distance),
+            #"KM": CacheKMeans(same_embed_distance, 10),
             "LFU": LFU(same_embed_distance),
-            "DS": DenStreamCache(same_embed_distance),
+            #"DS": DenStreamCache(same_embed_distance),
             # "FIFO": FIFO,
         }
         
         results = {}
         
-        with ProcessPoolExecutor() as executor:
+        with ProcessPoolExecutor(16) as executor:
             args = []
             for cache_name, cache in caches.items():
-                for cache_size in range(num_samples // 10, int(num_samples * 1.2), num_samples // 10):
+                for cache_size in range(num_samples // 20, int(num_samples // 2), int(num_samples // 20)):
                     args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name))
             raw_results = executor.map(process, args)
             # raw_results = [process(arg) for arg in args]
