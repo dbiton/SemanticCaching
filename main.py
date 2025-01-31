@@ -1,5 +1,6 @@
 from concurrent.futures import ProcessPoolExecutor
 import copy
+from itertools import chain
 import json
 import pickle
 from random import sample
@@ -87,33 +88,50 @@ def process(args):
     index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
     cache.initialize(cache_size, index)
     cache_hits = 0
-    #l2_cache_hits = 0
     t0 = time.time()
-    #index_unlimited = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
     for i_embed, embed in enumerate(embeds):
         cache_hit, evicted_embed_id = cache.request(embed.reshape(1, -1), i_embed)
         if cache_hit:
             cache_hits += 1
-        '''    l2_cache_hits += 1
+    iter_results = {
+        "Cache Name": cache_name,
+        "Hit Ratio": cache_hits / len(embeds),
+        "Runtime": time.time() - t0,
+        "Cache Size": cache_size
+    }
+    return iter_results
+
+def process_layered(args):
+    (cache, cache_size, dim, embeds, cache_name) = args
+    index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
+    cache.initialize(cache_size, index)
+    cache_hits = 0
+    l2_cache_hits = 0
+    t0 = time.time()
+    index_unlimited = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
+    for i_embed, embed in enumerate(embeds):
+        cache_hit, evicted_embed_id = cache.request(embed.reshape(1, -1), i_embed)
+        if cache_hit:
+            cache_hits += 1
         else:
             distances, neighbors = index_unlimited.search(embed.reshape(1, -1), 1)
             if distances[0][0] <= cache.same_embed_distance:
                 l2_cache_hits += 1
         if evicted_embed_id:
             evicted_embed = embeds[evicted_embed_id]
-            index_unlimited.add_with_ids(evicted_embed.reshape(1, -1), np.array([evicted_embed_id]))'''
+            index_unlimited.add_with_ids(evicted_embed.reshape(1, -1), np.array([evicted_embed_id]))
     # once something is evicted from the small cache, we put it into the larger unlimited cache
     iter_results = {
         "Cache Name": cache_name,
-        "Hit Ratio": cache_hits / len(embeds),
-        # "Hit Ratio W L2": l2_cache_hits / len(embeds),
-        "Runtime": time.time() - t0,
+        "Hit Ratio L1": cache_hits / len(embeds),
+        "Hit Ratio L2": l2_cache_hits / len(embeds),
+        "Runtime Layered": time.time() - t0,
         "Cache Size": cache_size
     }
     return iter_results
 
 def main():
-    num_samples = 10000
+    num_samples = 4000
     for dataset_name, embeds in load_embeds():
         print(f"loaded {dataset_name}...")
         sampled_indices = np.random.choice(embeds.shape[0], size=num_samples, replace=False)
@@ -125,7 +143,7 @@ def main():
         
         caches = {
             #"OPT2": OPT2(same_embed_distance, embeds),
-            #"Dummy": Dummy(same_embed_distance),
+            "Dummy": Dummy(same_embed_distance),
             #"OPT": OPT(same_embed_distance, embeds),
             #"ProximityScore": ProximityScore(1, 0.5),
             #"ProbMisses": ProbMisses,
@@ -150,7 +168,7 @@ def main():
             for cache_name, cache in caches.items():
                 for cache_size in range(num_samples // 20, int(num_samples // 2), int(num_samples // 20)):
                     args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name))
-            raw_results = executor.map(process, args)
+            raw_results = chain(executor.map(process_layered, args), executor.map(process, args))
             # raw_results = [process(arg) for arg in args]
 
         for iter_results in raw_results:
