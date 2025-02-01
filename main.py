@@ -2,6 +2,7 @@ from concurrent.futures import ProcessPoolExecutor
 import copy
 from itertools import chain
 import json
+import os
 import pickle
 from random import sample
 import time
@@ -12,8 +13,6 @@ import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from cache import *
-from cache_denstream import *
-from cache_kmeans import CacheKMeans
 
 has_gpu = False
 
@@ -68,7 +67,8 @@ def plot(dataset_name, results):
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
-        plt.savefig(f"{dataset_name}_{prop_name}.png")
+        figures_dir = "figures"
+        plt.savefig(os.path.join(figures_dir, f"{dataset_name}_{prop_name}.png"))
 
 def generate_embeds(mean, std_dev, dim, len):    
     np.random.seed(0)
@@ -80,8 +80,9 @@ def load_embeds():
         "StackOverflow": "embeds_so.pkl",
         "WildChat": "embeds_chat.pkl"
     }
+    embeds_dir = "datasets"
     for dataset_name, filename in filenames.items():
-        with open(filename, "rb") as f:
+        with open(os.path.join(embeds_dir, filename), "rb") as f:
             embeds = pickle.load(f)
             yield dataset_name, embeds
 
@@ -134,7 +135,7 @@ def process_layered(args):
     return iter_results
 
 def main():
-    num_samples = 10000
+    num_samples = 500
     for dataset_name, embeds in load_embeds():
         print(f"loaded {dataset_name}...")
         sampled_indices = np.random.choice(embeds.shape[0], size=num_samples, replace=False)
