@@ -47,7 +47,7 @@ class RR(Cache):
     def request(self, embed, embed_id):
         closest_embed_id, closest_embed_distance = self.get_closest_stored_embed(embed)
         cache_hit = False
-        evicted_item = None
+        evicted_item = embed_id
         if closest_embed_id in self.items and closest_embed_distance < self.same_embed_distance:
             self.items[closest_embed_id] += 1
             cache_hit = True
@@ -70,7 +70,7 @@ class LFU(Cache):
     def request(self, embed, embed_id):
         closest_embed_id, closest_embed_distance = self.get_closest_stored_embed(embed)
         cache_hit = False
-        evicted_item = None
+        evicted_item = embed_id
         if closest_embed_id in self.items and closest_embed_distance < self.same_embed_distance:
             self.items[closest_embed_id] += 1
             cache_hit = True
@@ -96,7 +96,7 @@ class LRU(Cache):
         self.time_index += 1
         closest_embed_id, closest_embed_distance = self.get_closest_stored_embed(embed)
         cache_hit = False
-        evicted_item = None
+        evicted_item = embed_id
         if closest_embed_id in self.items and closest_embed_distance < self.same_embed_distance:
             self.items[closest_embed_id] = self.time_index
             cache_hit = True
@@ -124,7 +124,7 @@ class OPT(Cache):
     def request(self, embed, embed_id) -> int:
         closest_embed_id, closest_embed_distance = self.get_closest_stored_embed(embed)
         cache_hit = False
-        evicted_item = None
+        evicted_item = embed_id
         if closest_embed_id in self.items and closest_embed_distance < self.same_embed_distance:
             cache_hit = True
 
@@ -163,7 +163,7 @@ class RAP(Cache):
     def request(self, embed, embed_id):
         closest_embed_id, closest_embed_distance = self.get_closest_stored_embed(embed)
         cache_hit = False
-        evicted_item = None
+        evicted_item = embed_id
         if closest_embed_id in self.items and closest_embed_distance < self.same_embed_distance:
             self.items[closest_embed_id] += 1
             cache_hit = True

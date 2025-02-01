@@ -77,6 +77,8 @@ def generate_embeds(mean, std_dev, dim, len):
 def load_embeds():
     filenames = {
         "Bing": "embeds_bing.pkl",
+        "StackOverflow": "embeds_so.pkl",
+        "WildChat": "embeds_chat.pkl"
     }
     for dataset_name, filename in filenames.items():
         with open(filename, "rb") as f:
@@ -123,6 +125,7 @@ def process_layered(args):
     # once something is evicted from the small cache, we put it into the larger unlimited cache
     iter_results = {
         "Cache Name": cache_name,
+        "Hit Ratio L1+L2": (cache_hits+l2_cache_hits) / len(embeds),
         "Hit Ratio L1": cache_hits / len(embeds),
         "Hit Ratio L2": l2_cache_hits / len(embeds),
         "Runtime Layered": time.time() - t0,
@@ -131,7 +134,7 @@ def process_layered(args):
     return iter_results
 
 def main():
-    num_samples = 4000
+    num_samples = 10000
     for dataset_name, embeds in load_embeds():
         print(f"loaded {dataset_name}...")
         sampled_indices = np.random.choice(embeds.shape[0], size=num_samples, replace=False)
@@ -166,7 +169,7 @@ def main():
         with ProcessPoolExecutor(16) as executor:
             args = []
             for cache_name, cache in caches.items():
-                for cache_size in range(num_samples // 20, int(num_samples // 2), int(num_samples // 20)):
+                for cache_size in range(num_samples // 50, int(num_samples // 5), int(num_samples // 50)):
                     args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name))
             raw_results = chain(executor.map(process_layered, args), executor.map(process, args))
             # raw_results = [process(arg) for arg in args]
