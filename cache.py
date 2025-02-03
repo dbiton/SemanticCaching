@@ -158,6 +158,9 @@ class RAP(Cache):
 
     def initialize(self, capacity: int, index):
         self.items = {}
+        self.lfu_id = None
+        self.lfu_hits = np.inf
+        self.lfu_updated = True
         super().initialize(capacity, index)
             
     def request(self, embed, embed_id):
@@ -165,17 +168,31 @@ class RAP(Cache):
         cache_hit = False
         evicted_item = embed_id
         if closest_embed_id in self.items and closest_embed_distance < self.same_embed_distance:
-            self.items[closest_embed_id] += 1
+            closest_embed_hits = self.items[closest_embed_id]
+            self.items[closest_embed_id] = closest_embed_hits + 1
+            if closest_embed_hits == self.lfu_hits:
+                self.lfu_updated = True
             cache_hit = True
         if self.size() >= self.capacity:
-            cand_embed_id = min(self.items, key=self.items.get)
-            cand_embed_hits = self.items[cand_embed_id]
+            if self.lfu_updated:
+                self.lfu_id = min(self.items, key=self.items.get)
+                self.lfu_hits = self.items[self.lfu_id]
+                self.lfu_updated = False
+            cand_embed_id = self.lfu_id
+            cand_embed_hits = self.lfu_hits
+            #assert min(self.items.values()) == cand_embed_hits
             thresh = 1 / (cand_embed_hits + 1)
             if random.random() >= thresh:
                 return cache_hit, evicted_item
             del self.items[cand_embed_id]
             evicted_item = cand_embed_id
             self.index.remove_ids(np.array([cand_embed_id]))
+            if cand_embed_hits == self.lfu_hits:
+                self.lfu_updated = True
         self.items[embed_id] = 1
         self.index.add_with_ids(embed, np.array([embed_id]))
+        if 1 < self.lfu_hits:
+            self.lfu_id = embed_id
+            self.lfu_hits = 1
+            self.lfu_updated = False
         return cache_hit, evicted_item
