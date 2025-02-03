@@ -15,6 +15,7 @@ from sentence_transformers import SentenceTransformer
 from cache import *
 
 has_gpu = False
+run_parallel = True
 
 def embed_strings(strings: List[str], model_name='all-MiniLM-L6-v2'):
     model = SentenceTransformer(model_name)
@@ -167,13 +168,16 @@ def main():
         
         results = {}
         
-        with ProcessPoolExecutor(16) as executor:
-            args = []
-            for cache_name, cache in caches.items():
-                for cache_size in range(num_samples // 50, int(num_samples // 5), int(num_samples // 50)):
-                    args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name))
-            raw_results = chain(executor.map(process_layered, args), executor.map(process, args))
-            # raw_results = [process(arg) for arg in args]
+        args = []
+        for cache_name, cache in caches.items():
+            for cache_size in range(num_samples // 50, int(num_samples // 5), int(num_samples // 50)):
+                args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name))
+        
+        if run_parallel:
+            with ProcessPoolExecutor(16) as executor:
+                raw_results = chain(executor.map(process_layered, args), executor.map(process, args))
+        else:
+            raw_results = chain(map(process_layered, args), map(process, args))
 
         for iter_results in raw_results:
             for prop_name, prop in iter_results.items():
