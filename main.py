@@ -15,7 +15,7 @@ from sentence_transformers import SentenceTransformer
 from cache import *
 
 has_gpu = False
-run_parallel = True
+run_parallel = False
 
 def embed_strings(strings: List[str], model_name='all-MiniLM-L6-v2'):
     model = SentenceTransformer(model_name)
@@ -80,11 +80,11 @@ def load_embeds():
 
 def yield_batches(lst, k):
     for i in range(0, len(lst), k):
-        yield lst[i:i + k], list(range(i, max(i+k, len(lst))))
+        yield lst[i:i + k], list(range(i, min(i+k, len(lst))))
 
 
 def process(args):
-    (cache, cache_size, dim, embeds, cache_name, batch_size) = args
+    (cache, cache_size, dim, embeds, cache_name, batch_size, count_nn) = args
     index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
     cache.initialize(cache_size, index)
     cache_hits = 0
@@ -101,7 +101,7 @@ def process(args):
     return iter_results
 
 def process_layered(args):
-    (cache, cache_size, dim, embeds, cache_name, batch_size) = args
+    (cache, cache_size, dim, embeds, cache_name, batch_size, count_nn) = args
     index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
     cache.initialize(cache_size, index)
     cache_hits = 0
@@ -131,7 +131,8 @@ def process_layered(args):
     return iter_results
 
 def main():
-    batch_size = 16
+    batch_size = 10
+    count_nn = 3
     num_samples = 1000
     for dataset_name, embeds in load_embeds():
         print(f"loaded {dataset_name}...")
@@ -154,7 +155,7 @@ def main():
         args = []
         for cache_name, cache in caches.items():
             for cache_size in range(num_samples // 50, int(num_samples // 5), int(num_samples // 50)):
-                args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name, batch_size))
+                args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name, batch_size, count_nn))
 
         if run_parallel:
             with ProcessPoolExecutor(8) as executor:
