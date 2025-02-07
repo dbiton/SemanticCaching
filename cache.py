@@ -1,3 +1,4 @@
+import heapq
 import random
 from collections import OrderedDict
 import numpy as np
@@ -19,7 +20,6 @@ class Cache:
         raise NotImplementedError("virtual method")
 
     def get_closest_stored_embeds(self, embeds, count_nn=1):
-        # Do a single batched search in the index.
         dists, ids = self.index.search(embeds, count_nn)
         return dists, ids
 
@@ -227,5 +227,44 @@ class RAP(Cache):
         if removals:
             self.index.remove_ids(np.array(removals))
         if additions_ids:
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        return cache_hits, evicted_items
+
+class FixedRadius(Cache):
+    def __init__(self, same_embed_distance, radius):
+        super().__init__(same_embed_distance)
+        self.radius = radius
+
+    def initialize(self, capacity: int, index):
+        self.items = {}
+        super().initialize(capacity, index)
+
+    def request(self, embeds, embeds_ids, count_nn=1):
+        closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        cache_hits = np.zeros((len(embeds), count_nn), dtype=bool)
+        evicted_items = []
+        additions = []
+        for i, embed_id in enumerate(embeds_ids):
+            embed_closest_ids = closest_ids[i]
+            embed_closest_distances = closest_dists[i]
+            size_neigh = np.sum(embed_closest_distances < self.radius)
+            for i_nn, (nn_embed_id, nn_embed_distance) in enumerate(zip(embed_closest_ids, embed_closest_distances)):
+                if nn_embed_distance <= self.radius:
+                    distance_factor = nn_embed_distance / self.radius
+                    self.items[nn_embed_id] = self.items[nn_embed_id] * distance_factor + size_neigh * (1 - distance_factor)
+                if nn_embed_distance <= self.same_embed_distance:
+                    cache_hits[i][i_nn] = True
+            additions.append((embed_id, embeds[i], size_neigh))
+        count_removed = (len(additions) + self.size()) - self.capacity        
+        if count_removed > 0:
+            evicted_items = heapq.nsmallest(count_removed, self.items, key=self.items.get)
+            for k in evicted_items:
+                del self.items[k]
+            self.index.remove_ids(np.array(evicted_items))
+        if additions:
+            additions_embeds = [v for (_, v, _) in additions]
+            additions_ids = [v for (v, _, _) in additions]
+            for (embed_id, _, size_neigh) in additions:
+                self.items[embed_id] = size_neigh
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items

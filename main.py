@@ -15,7 +15,7 @@ from sentence_transformers import SentenceTransformer
 from cache import *
 
 has_gpu = False
-run_parallel = False
+run_parallel = True
 
 def embed_strings(strings: List[str], model_name='all-MiniLM-L6-v2'):
     model = SentenceTransformer(model_name)
@@ -90,8 +90,8 @@ def process(args):
     cache_hits = 0
     t0 = time.time()
     for batch_embeds, i_embeds in yield_batches(embeds, batch_size):
-        iter_cache_hits, evicted_embeds_ids = cache.request(batch_embeds, i_embeds)
-        cache_hits += sum(iter_cache_hits)
+        iter_cache_hits, evicted_embeds_ids = cache.request(batch_embeds, i_embeds, count_nn)
+        cache_hits += np.sum(np.any(iter_cache_hits, axis=1))
     iter_results = {
         "Cache Name": cache_name,
         "Hit Ratio": cache_hits / len(embeds),
@@ -109,11 +109,11 @@ def process_layered(args):
     t0 = time.time()
     index_unlimited = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
     for batch_embeds, i_embeds in yield_batches(embeds, batch_size):
-        iter_cache_hits, evicted_embeds_ids = cache.request(batch_embeds, i_embeds)
-        iter_cache_hits_count = sum(iter_cache_hits)
+        iter_cache_hits, evicted_embeds_ids = cache.request(batch_embeds, i_embeds, count_nn)
+        iter_cache_hits_count = np.sum(np.any(iter_cache_hits, axis=1))
         cache_hits += iter_cache_hits_count
         if iter_cache_hits_count != len(iter_cache_hits):
-            i_embeds_cache_misses = [i_embed for i_embed, embed_hit in zip(i_embeds, iter_cache_hits) if not embed_hit]
+            i_embeds_cache_misses = np.where(np.any(iter_cache_hits, axis=1) != True)[0] + min(i_embeds)
             batch_embeds_misses = embeds[i_embeds_cache_misses]
             distances, neighbors = index_unlimited.search(batch_embeds_misses, 1)
             l2_cache_hits += np.sum(distances <= cache.same_embed_distance)
@@ -132,21 +132,21 @@ def process_layered(args):
 
 def main():
     batch_size = 10
-    count_nn = 3
-    num_samples = 1000
+    count_nn = 10
+    num_samples = 10000
     for dataset_name, embeds in load_embeds():
         print(f"loaded {dataset_name}...")
-        sampled_indices = np.random.choice(embeds.shape[0], size=num_samples, replace=False)
-        embeds = embeds[sampled_indices]
+        embeds = embeds[:num_samples]
         print("loaded!")
         dim = 384
         same_embed_distance = 0.5
         similar_embed_distance = 1.0
 
         caches = {
+            "Radius": FixedRadius(same_embed_distance, similar_embed_distance),
             "Dummy": Dummy(same_embed_distance),
-            "RR": RR(same_embed_distance),
-            "RAP": RAP(same_embed_distance),
+            #"RR": RR(same_embed_distance),
+            #"RAP": RAP(same_embed_distance),
             "LRU": LRU(same_embed_distance),
             "LFU": LFU(same_embed_distance)
         }
