@@ -15,7 +15,7 @@ from sentence_transformers import SentenceTransformer
 from cache import *
 
 has_gpu = False
-run_parallel = True
+run_parallel = False
 
 def embed_strings(strings: List[str], model_name='all-MiniLM-L6-v2'):
     model = SentenceTransformer(model_name)
@@ -85,7 +85,7 @@ def yield_batches(lst, k):
 
 def process(args):
     (cache, cache_size, dim, embeds, cache_name, batch_size, count_nn) = args
-    index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
+    index = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
     cache.initialize(cache_size, index)
     cache_hits = 0
     t0 = time.time()
@@ -133,7 +133,7 @@ def process_layered(args):
 def main():
     batch_size = 10
     count_nn = 10
-    num_samples = 10000
+    num_samples = 2000
     for dataset_name, embeds in load_embeds():
         print(f"loaded {dataset_name}...")
         embeds = embeds[:num_samples]
@@ -143,10 +143,11 @@ def main():
         similar_embed_distance = 1.0
 
         caches = {
+            "PCA": PCA(same_embed_distance),
             "Radius": FixedRadius(same_embed_distance, similar_embed_distance),
             "Dummy": Dummy(same_embed_distance),
-            #"RR": RR(same_embed_distance),
-            #"RAP": RAP(same_embed_distance),
+            "RR": RR(same_embed_distance),
+            "RAP": RAP(same_embed_distance),
             "LRU": LRU(same_embed_distance),
             "LFU": LFU(same_embed_distance)
         }
@@ -154,7 +155,7 @@ def main():
         results = {}
         args = []
         for cache_name, cache in caches.items():
-            for cache_size in range(num_samples // 50, int(num_samples // 5), int(num_samples // 50)):
+            for cache_size in range(num_samples // 10, int(num_samples), int(num_samples // 10)):
                 args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name, batch_size, count_nn))
 
         if run_parallel:
