@@ -79,9 +79,9 @@ def calculate_entropy_of_principal_components(embeddings):
     return pca_entropy
 
 datasets_paths = {
-    "Bing": "embeds_bing.pkl", 
-    "StackOverflow": "embeds_so.pkl", 
-    "WildChat": "embeds_chat.pkl"
+    "Bing": "datasets/embeds_bing.pkl", 
+    "StackOverflow": "datasets/embeds_so.pkl", 
+    "WildChat": "datasets/embeds_chat.pkl"
 }
 
 results = {}
@@ -92,7 +92,7 @@ for dataset_name, file_path in datasets_paths.items():
         embeds = pickle.load(f)
 
     # Use a subset of embeddings if needed
-    embeds = embeds[:50000]
+    embeds = embeds[:1000]
     print(dataset_name)
     plot_pca(embeds, f"{dataset_name}_pca.png")
     plot_tsne(embeds, f"{dataset_name}_tsne.png")
