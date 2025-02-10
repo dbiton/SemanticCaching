@@ -3,6 +3,7 @@ import random
 from collections import OrderedDict, defaultdict
 import numpy as np
 from scipy.spatial import distance_matrix
+import faiss
 
 
 class Cache:
@@ -270,83 +271,6 @@ class FixedRadius(Cache):
             additions_ids = [v for (v, _, _) in additions]
             for (embed_id, _, size_neigh) in additions:
                 self.items[embed_id] = size_neigh
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
-        return cache_hits, evicted_items
-
-import faiss
-class PCA(Cache):
-    def __init__(self, same_embed_distance, pca_dim = 9, cluster_diameter = 1.0):
-        super().__init__(same_embed_distance)
-        self.pca_dim = pca_dim
-        self.train_counter = 0
-        self.cluster_diameter = cluster_diameter
-        self.pca = None
-
-    def train_pca(self):
-        n_embeds = self.index.ntotal
-        dim_embeds = self.index.d
-        embeds = self.index.index.reconstruct_n(0, n_embeds)
-        embeds_ids = faiss.vector_to_array(self.index.id_map)
-        self.pca = faiss.PCAMatrix(dim_embeds, self.pca_dim)
-        self.pca.train(embeds)
-        assert self.pca.is_trained
-        embeds_pca = self.pca.apply(embeds)
-        self.clusters = defaultdict(list)
-        for embed_id, embed_pca in zip(embeds_ids, embeds_pca):
-            cluster_id = self.embed_pca_to_cluster_id(embed_pca)
-            self.clusters[cluster_id].append(embed_id)
-        
-    def embeds_to_clusters_ids(self, embeds):
-        if not self.pca:
-            return [-1 for _ in range(len(embeds))]
-        embeds_pca = self.pca.apply(np.array(embeds))
-        return [self.embed_pca_to_cluster_id(embed_pca) for embed_pca in embeds_pca]          
-    
-    def embed_pca_to_cluster_id(self, embed_pca):
-        unit_hypercube_diameter = np.sqrt(self.pca_dim)
-        hypercube_side_length = self.cluster_diameter / unit_hypercube_diameter
-        cluster_id = np.round(embed_pca / hypercube_side_length).astype(int)
-        return tuple(cluster_id)
-    
-    def initialize(self, capacity: int, index):
-        self.items = {}
-        super().initialize(capacity, index)
-
-    def request(self, embeds, embeds_ids, count_nn=1):
-        self.train_counter += len(embeds)
-        if self.train_counter >= self.capacity:
-            self.train_counter = 0
-            self.train_pca()
-        closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
-        cache_hits = np.zeros((len(embeds), count_nn), dtype=bool)
-        evicted_items = []
-        additions = []
-        for i, embed_id in enumerate(embeds_ids):
-            embed_closest_ids = closest_ids[i]
-            embed_closest_distances = closest_dists[i]
-            for i_nn, (nn_embed_id, nn_embed_distance) in enumerate(zip(embed_closest_ids, embed_closest_distances)):
-                if nn_embed_distance <= self.same_embed_distance:
-                    cache_hits[i][i_nn] = True
-            if np.sum(cache_hits[i]) == 0 or self.size() < self.capacity:
-                additions.append((embed_id, embeds[i]))
-            else:
-                evicted_items.append(embed_id)
-        count_removed = (len(additions) + self.size()) - self.capacity        
-        if count_removed > 0:
-            for _ in range(count_removed):
-                smallest_cluster = min(self.clusters, key=lambda k: len(self.clusters[k]))
-                k = self.clusters[smallest_cluster].pop()
-                if len(self.clusters[smallest_cluster]) == 0:
-                    del self.clusters[smallest_cluster]
-                del self.items[k]
-                evicted_items.append(k)
-            self.index.remove_ids(np.array(evicted_items))
-        if additions:
-            additions_embeds = [v for (_, v) in additions]
-            additions_ids = [v for (v, _) in additions]
-            additions_clusters_ids = self.embeds_to_clusters_ids(additions_embeds)
-            for (embed_id, embed), cluster_id in zip(additions, additions_clusters_ids):
-                self.items[embed_id] = cluster_id
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
