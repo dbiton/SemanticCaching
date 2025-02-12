@@ -52,7 +52,7 @@ class RR(Cache):
     def request(self, embeds, embeds_ids, count_nn=1):
         # One batched call to the index:
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
-        cache_hits = np.zeros((len(embeds), count_nn), dtype=bool)
+        cache_hits = np.zeros((len(embeds),), dtype=bool)
         evicted_items = (
             []
         )  # one evicted id per request (if no eviction then simply return the new embed id)
@@ -80,7 +80,7 @@ class RR(Cache):
                 self.items[embed_id] = 1
                 additions_embeds.append(embeds[i])
                 additions_ids.append(embed_id)
-                cache_hits[i][i_nn] = hit
+                cache_hits[i] += hit
                 evicted_items.append(evicted)
 
         if removals:
@@ -349,3 +349,59 @@ class PCA(Cache):
                 self.items[embed_id] = cluster_id
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
+
+class OPT(Cache):
+    def __init__(self, same_embed_distance, embeds):
+        super().__init__(same_embed_distance)
+        self.embeds_distances = distance_matrix(embeds, embeds)
+        self.embeds_covers = (self.embeds_distances <= same_embed_distance).astype(int)
+        tri_l = np.tril_indices_from(self.embeds_covers)
+        self.embeds_covers[tri_l] = 0
+
+    def initialize(self, capacity: int, index):
+        self.items = {}
+        self.curr_embed_id = 0
+        super().initialize(capacity, index)
+    
+    def get_next_hit(self, embed_id):
+        row = self.embeds_covers[embed_id]
+        i = self.curr_embed_id
+        sub_row = row[i+1:]
+        if np.any(sub_row):
+            return np.argmax(sub_row) + (i + 1)
+        else:
+            return float('inf')
+        
+    def request(self, embeds, embeds_ids, count_nn=1):
+        closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        cache_hits = np.zeros((len(embeds), count_nn), dtype=bool)
+        evicted_items = []
+        rejected_items = []
+        additions = []
+        i_embed = -1
+        for embed, embed_id in zip(embeds, embeds_ids):
+            i_embed += 1
+            for i_nn, nn_distance in enumerate(closest_dists[i_embed]):
+                if nn_distance <= self.same_embed_distance:
+                    cache_hits[i_embed][i_nn] = True
+            self.curr_embed_id = embed_id
+            embed_next_hit = self.get_next_hit(embed_id)
+            max_next_hit_embed_id = max(self.items, key=self.items.get, default=None)
+            max_next_hit = self.items.get(max_next_hit_embed_id, float('inf'))
+            if embed_next_hit <= max_next_hit:
+                if self.capacity <= self.size():
+                    evicted_items.append(max_next_hit_embed_id)
+                    self.items.pop(max_next_hit_embed_id, None)
+                self.items[embed_id] = embed_next_hit
+                if embed_next_hit < float('inf'):
+                    x = 3
+                additions.append((embed_id, embed))
+            else: 
+                rejected_items.append(embed_id)
+        if additions:
+            additions_embeds = [v for (_, v) in additions]
+            additions_ids = [v for (v, _) in additions]
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
+        return cache_hits, evicted_items + rejected_items
