@@ -114,6 +114,7 @@ class LFU(Cache):
                 cand = closest_ids[i][i_nn]
                 cand_dist = closest_dists[i][i_nn]
                 if cand in self.items and cand_dist < self.same_embed_distance:
+                    #print("LFU hit", cand, embed_id)
                     self.items[cand] += 1
                     hit = True
                 # Evict the least–frequently used item if the cache is full.
@@ -130,8 +131,10 @@ class LFU(Cache):
 
         if removals:
             self.index.remove_ids(np.array(removals))
+            #print("LFU evict", removals)
         if additions_ids:
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            #print("LFU add", additions_ids)
         return cache_hits, evicted_items
 
 
@@ -383,18 +386,18 @@ class OPT(Cache):
             i_embed += 1
             for i_nn, nn_distance in enumerate(closest_dists[i_embed]):
                 if nn_distance <= self.same_embed_distance:
+                    #print("OPT hit", closest_ids[i_embed][i_nn], embed_id)
                     cache_hits[i_embed][i_nn] = True
             self.curr_embed_id = embed_id
             embed_next_hit = self.get_next_hit(embed_id)
-            max_next_hit_embed_id = max(self.items, key=self.items.get, default=None)
+            items = {eid: self.get_next_hit(eid) for eid in self.items.keys()}
+            max_next_hit_embed_id = max(items, key=items.get, default=None)
             max_next_hit = self.items.get(max_next_hit_embed_id, float('inf'))
-            if embed_next_hit <= max_next_hit:
+            if self.capacity > self.size() or embed_next_hit < max_next_hit:
                 if self.capacity <= self.size():
                     evicted_items.append(max_next_hit_embed_id)
                     self.items.pop(max_next_hit_embed_id, None)
                 self.items[embed_id] = embed_next_hit
-                if embed_next_hit < float('inf'):
-                    x = 3
                 additions.append((embed_id, embed))
             else: 
                 rejected_items.append(embed_id)
@@ -402,6 +405,8 @@ class OPT(Cache):
             additions_embeds = [v for (_, v) in additions]
             additions_ids = [v for (v, _) in additions]
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            #print("OPT add", additions_ids)
         if evicted_items:
             self.index.remove_ids(np.array(evicted_items))
+            #print("OPT evict", evicted_items)
         return cache_hits, evicted_items + rejected_items
