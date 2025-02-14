@@ -15,7 +15,7 @@ from sentence_transformers import SentenceTransformer
 from cache import *
 
 has_gpu = False
-run_parallel = False
+run_parallel = True
 
 def embed_strings(strings: List[str], model_name='all-MiniLM-L6-v2'):
     model = SentenceTransformer(model_name)
@@ -115,7 +115,8 @@ def process_layered(args):
         if iter_cache_hits_count != len(iter_cache_hits):
             i_embeds_cache_misses = np.where(np.any(iter_cache_hits, axis=1) != True)[0] + min(i_embeds)
             batch_embeds_misses = embeds[i_embeds_cache_misses]
-            distances, neighbors = index_unlimited.search(batch_embeds_misses, 1)
+            distances_sqrd, neighbors = index_unlimited.search(batch_embeds_misses, 1)
+            distances = np.sqrt(distances_sqrd)
             l2_cache_hits += np.sum(distances <= cache.same_embed_distance)
         if len(evicted_embeds_ids) > 0:
             evicted_embed = embeds[evicted_embeds_ids]
@@ -132,21 +133,22 @@ def process_layered(args):
 
 def main():
     batch_size = 10
-    count_nn = 10
-    num_samples = 2000
+    count_nn = 1
+    num_samples = 10000
     for dataset_name, embeds in load_embeds():
         print(f"loaded {dataset_name}...")
         embeds = embeds[:num_samples]
         print("loaded!")
         dim = 384
-        same_embed_distance = 0.5
+        same_embed_distance = 0.75
         similar_embed_distance = 1.0
 
         caches = {
-            "PCA": PCA(same_embed_distance),
+            "OPT": OPT(same_embed_distance, embeds),
+            #"PCA": PCA(same_embed_distance),
             "Radius": FixedRadius(same_embed_distance, similar_embed_distance),
             "Dummy": Dummy(same_embed_distance),
-            "RR": RR(same_embed_distance),
+            #"RR": RR(same_embed_distance),
             "RAP": RAP(same_embed_distance),
             "LRU": LRU(same_embed_distance),
             "LFU": LFU(same_embed_distance)
@@ -155,11 +157,11 @@ def main():
         results = {}
         args = []
         for cache_name, cache in caches.items():
-            for cache_size in range(num_samples // 10, int(num_samples), int(num_samples // 10)):
+            for cache_size in range(num_samples // 20, int(num_samples) // 2, int(num_samples // 20)):
                 args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name, batch_size, count_nn))
 
         if run_parallel:
-            with ProcessPoolExecutor(8) as executor:
+            with ProcessPoolExecutor(16) as executor:
                 raw_results = chain(executor.map(process_layered, args), executor.map(process, args))
         else:
             raw_results = chain(map(process_layered, args), map(process, args))

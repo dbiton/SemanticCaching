@@ -22,6 +22,7 @@ class Cache:
 
     def get_closest_stored_embeds(self, embeds, count_nn=1):
         dists, ids = self.index.search(embeds, count_nn)
+        dists = np.sqrt(dists)
         return dists, ids
 
     def size(self):
@@ -67,7 +68,7 @@ class RR(Cache):
                 evicted = embed_id
                 cand = closest_ids[i][i_nn]
                 cand_dist = closest_dists[i][i_nn]
-                if cand in self.items and cand_dist < self.same_embed_distance:
+                if cand in self.items and cand_dist <= self.same_embed_distance:
                     self.items[cand] += 1
                     hit = True
                 # If our cache is full, remove one random element:
@@ -113,7 +114,7 @@ class LFU(Cache):
                 evicted = embed_id
                 cand = closest_ids[i][i_nn]
                 cand_dist = closest_dists[i][i_nn]
-                if cand in self.items and cand_dist < self.same_embed_distance:
+                if cand in self.items and cand_dist <= self.same_embed_distance:
                     #print("LFU hit", cand, embed_id)
                     self.items[cand] += 1
                     hit = True
@@ -161,7 +162,7 @@ class LRU(Cache):
                 evicted = embed_id
                 cand = closest_ids[i][i_nn]
                 cand_dist = closest_dists[i][i_nn]
-                if cand in self.items and cand_dist < self.same_embed_distance:
+                if cand in self.items and cand_dist <= self.same_embed_distance:
                     # Move the item to the end to mark it as recently used.
                     self.items.move_to_end(cand)
                     hit = True
@@ -205,7 +206,7 @@ class RAP(Cache):
                 evicted = embed_id
                 cand = closest_ids[i][i_nn]
                 cand_dist = closest_dists[i][i_nn]
-                if cand in self.items and cand_dist < self.same_embed_distance:
+                if cand in self.items and cand_dist <= self.same_embed_distance:
                     self.items[cand] += 1
                     hit = True
                 if self.size() >= self.capacity:
@@ -392,8 +393,8 @@ class OPT(Cache):
             embed_next_hit = self.get_next_hit(embed_id)
             items = {eid: self.get_next_hit(eid) for eid in self.items.keys()}
             max_next_hit_embed_id = max(items, key=items.get, default=None)
-            max_next_hit = self.items.get(max_next_hit_embed_id, float('inf'))
-            if self.capacity > self.size() or embed_next_hit < max_next_hit:
+            max_next_hit = items.get(max_next_hit_embed_id, float('inf'))
+            if self.capacity > self.size() or (embed_next_hit < max_next_hit and embed_next_hit not in items.values()):
                 if self.capacity <= self.size():
                     evicted_items.append(max_next_hit_embed_id)
                     self.items.pop(max_next_hit_embed_id, None)
