@@ -15,7 +15,7 @@ from sentence_transformers import SentenceTransformer
 from cache import *
 
 has_gpu = False
-run_parallel = True
+run_parallel = False
 
 def embed_strings(strings: List[str], model_name='all-MiniLM-L6-v2'):
     model = SentenceTransformer(model_name)
@@ -91,7 +91,7 @@ def process(args):
     t0 = time.time()
     for batch_embeds, i_embeds in yield_batches(embeds, batch_size):
         iter_cache_hits, evicted_embeds_ids = cache.request(batch_embeds, i_embeds, count_nn)
-        cache_hits += np.sum(np.any(iter_cache_hits, axis=1))
+        cache_hits += np.sum(np.any(iter_cache_hits))
     iter_results = {
         "Cache Name": cache_name,
         "Hit Ratio": cache_hits / len(embeds),
@@ -110,10 +110,10 @@ def process_layered(args):
     index_unlimited = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
     for batch_embeds, i_embeds in yield_batches(embeds, batch_size):
         iter_cache_hits, evicted_embeds_ids = cache.request(batch_embeds, i_embeds, count_nn)
-        iter_cache_hits_count = np.sum(np.any(iter_cache_hits, axis=1))
+        iter_cache_hits_count = np.sum(np.any(iter_cache_hits))
         cache_hits += iter_cache_hits_count
         if iter_cache_hits_count != len(iter_cache_hits):
-            i_embeds_cache_misses = np.where(np.any(iter_cache_hits, axis=1) != True)[0] + min(i_embeds)
+            i_embeds_cache_misses = np.where(np.any(iter_cache_hits) != True)[0] + min(i_embeds)
             batch_embeds_misses = embeds[i_embeds_cache_misses]
             distances_sqrd, neighbors = index_unlimited.search(batch_embeds_misses, 1)
             distances = np.sqrt(distances_sqrd)
@@ -133,8 +133,8 @@ def process_layered(args):
 
 def main():
     batch_size = 10
-    count_nn = 1
-    num_samples = 10000
+    count_nn = 10
+    num_samples = 1000
     for dataset_name, embeds in load_embeds():
         print(f"loaded {dataset_name}...")
         embeds = embeds[:num_samples]
@@ -157,11 +157,11 @@ def main():
         results = {}
         args = []
         for cache_name, cache in caches.items():
-            for cache_size in range(num_samples // 20, int(num_samples) // 2, int(num_samples // 20)):
+            for cache_size in range(num_samples // 50, int(num_samples) // 4, int(num_samples // 50)):
                 args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name, batch_size, count_nn))
 
         if run_parallel:
-            with ProcessPoolExecutor(16) as executor:
+            with ProcessPoolExecutor(8) as executor:
                 raw_results = chain(executor.map(process_layered, args), executor.map(process, args))
         else:
             raw_results = chain(map(process_layered, args), map(process, args))
