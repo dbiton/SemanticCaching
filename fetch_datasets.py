@@ -20,14 +20,14 @@ if __name__ == "__main__":
         pickle.dump(embeds_bing, f)
 
     print("generating so...")
-    with open(os.path.join("embeds_so.pkl", embeds_dir), "wb") as f:
+    with open(os.path.join(embeds_dir, "embeds_so.pkl"), "wb") as f:
         ds_so = load_dataset("pacovaldez/stackoverflow-questions")
         questions_so = ds_so['train']['title']
         embeds_so = embed_strings(questions_so)
         pickle.dump(embeds_so, f)
 
     print("generating chat...")
-    with open(os.path.join("embeds_chat.pkl", embeds_dir), "wb") as f:
+    with open(os.path.join(embeds_dir, "embeds_chat.pkl"), "wb") as f:
         ds_chat = load_dataset("allenai/WildChat-1M")
         questions_chat = [e['conversation'][0]['content'] for e in ds_chat['train'] if e['language'] == "English"]
         embeds_chat = embed_strings(questions_chat)
