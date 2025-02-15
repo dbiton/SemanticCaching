@@ -326,11 +326,7 @@ class PCA(Cache):
         evicted_items = []
         additions = []
         for i, embed_id in enumerate(embeds_ids):
-            embed_closest_ids = closest_ids[i]
-            embed_closest_distances = closest_dists[i]
-            for i_nn, (nn_embed_id, nn_embed_distance) in enumerate(zip(embed_closest_ids, embed_closest_distances)):
-                if nn_embed_distance <= self.same_embed_distance:
-                    cache_hits[i][i_nn] = True
+            cache_hits[i] = closest_dists[i] <= self.same_embed_distance
             if np.sum(cache_hits[i]) == 0 or self.size() < self.capacity:
                 additions.append((embed_id, embeds[i]))
             else:
@@ -382,19 +378,14 @@ class OPT(Cache):
         evicted_items = []
         rejected_items = []
         additions = []
-        i_embed = -1
-        for embed, embed_id in zip(embeds, embeds_ids):
-            i_embed += 1
-            for i_nn, nn_distance in enumerate(closest_dists[i_embed]):
-                if nn_distance <= self.same_embed_distance:
-                    #print("OPT hit", closest_ids[i_embed][i_nn], embed_id)
-                    cache_hits[i_embed][i_nn] = True
+        for i_embed, (embed, embed_id) in enumerate(zip(embeds, embeds_ids)):
+            cache_hits[i_embed] = closest_dists[i_embed] <= self.same_embed_distance
             self.curr_embed_id = embed_id
             embed_next_hit = self.get_next_hit(embed_id)
-            items = {eid: self.get_next_hit(eid) for eid in self.items.keys()}
-            max_next_hit_embed_id = max(items, key=items.get, default=None)
-            max_next_hit = items.get(max_next_hit_embed_id, float('inf'))
-            if self.capacity > self.size() or (embed_next_hit < max_next_hit and embed_next_hit not in items.values()):
+            self.items = {eid: self.get_next_hit(eid) if next_hit <= self.curr_embed_id else next_hit for eid, next_hit in self.items.items()}
+            max_next_hit_embed_id = max(self.items, key=self.items.get, default=None)
+            max_next_hit = self.items.get(max_next_hit_embed_id, float('inf'))
+            if self.capacity > self.size() or (embed_next_hit < max_next_hit and embed_next_hit not in self.items.values()):
                 if self.capacity <= self.size():
                     evicted_items.append(max_next_hit_embed_id)
                     self.items.pop(max_next_hit_embed_id, None)
@@ -406,8 +397,6 @@ class OPT(Cache):
             additions_embeds = [v for (_, v) in additions]
             additions_ids = [v for (v, _) in additions]
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
-            #print("OPT add", additions_ids)
         if evicted_items:
             self.index.remove_ids(np.array(evicted_items))
-            #print("OPT evict", evicted_items)
         return cache_hits, evicted_items + rejected_items
