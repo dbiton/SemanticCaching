@@ -134,7 +134,7 @@ def process_layered(args):
 def main():
     batch_size = 10
     count_nn = 10
-    num_samples = 1000
+    num_samples = 250
     for dataset_name, embeds in load_embeds():
         print(f"loaded {dataset_name}...")
         embeds = embeds[:num_samples]
@@ -145,6 +145,7 @@ def main():
 
         caches = {
             "OPT": OPT(same_embed_distance, embeds),
+            "TinyLFU": TinyLFU(same_embed_distance),
             #"PCA": PCA(same_embed_distance),
             "Radius": FixedRadius(same_embed_distance, similar_embed_distance),
             "Dummy": Dummy(same_embed_distance),
