@@ -78,31 +78,26 @@ class LFU(Cache):
 
     def request(self, embeds, embeds_ids, count_nn=1):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
-        cache_hits_indices = np.where(closest_dists < self.same_embed_distance)
-        cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.count_nonzero(mask, axis=1)
         evicted_items = []
-        removals = []
         additions_embeds = []
         additions_ids = []
-        for i, embed_id in enumerate(embeds_ids):
-            # too many pops!
-            for i_nn in range(len(closest_ids[i])):
-                evicted = embed_id
-                cand = closest_ids[i][i_nn]
-                cand_dist = closest_dists[i][i_nn]
-                if cand_dist <= self.same_embed_distance:
-                    self.items[cand] += 1
-                if self.size() >= self.capacity:
-                    rem = min(self.items, key=self.items.get)
-                    del self.items[rem]
-                    removals.append(rem)
-                    evicted = rem
-                self.items[embed_id] = 1
-                additions_embeds.append(embeds[i])
-                additions_ids.append(embed_id)
-                evicted_items.append(evicted)
-        if removals:
-            self.index.remove_ids(np.array(removals))
+        count_remove = max(0, (len(embeds) + self.size()) - self.capacity)
+        for i_embed, i_nn in zip(*cache_hits_indices):
+            cand = closest_ids[i_embed][i_nn]
+            self.items[cand] += 1
+        for _ in range(count_remove):
+            evicted_embed_id = min(self.items, key=self.items.get)
+            del self.items[evicted_embed_id]
+            evicted_items.append(evicted_embed_id)
+        for embed_id, embed in zip(embeds_ids, embeds):
+            self.items[embed_id] = 0
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
         if additions_ids:
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
@@ -112,81 +107,68 @@ class DistanceLFU(Cache):
         super().__init__(same_embed_distance)
 
     def initialize(self, capacity: int, index):
-        # Use a dict mapping embed_id -> frequency (access count)
         self.items = {}
         super().initialize(capacity, index)
-
+    
     def request(self, embeds, embeds_ids, count_nn=1):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
-        cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.sum(mask, axis=1)
         evicted_items = []
-        removals = []
         additions_embeds = []
         additions_ids = []
-        for i, embed_id in enumerate(embeds_ids):
-            for i_nn in range(len(closest_ids[i])):
-                evicted = embed_id
-                cand = closest_ids[i][i_nn]
-                cand_dist = closest_dists[i][i_nn]
-                if cand in self.items and cand_dist <= self.same_embed_distance:
-                    score = 1 - cand_dist / self.same_embed_distance
-                    self.items[cand] += score
-                if self.size() >= self.capacity:
-                    rem = min(self.items, key=self.items.get)
-                    del self.items[rem]
-                    removals.append(rem)
-                    evicted = rem
-                self.items[embed_id] = max(0, 1 - cand_dist / self.same_embed_distance)
-                additions_embeds.append(embeds[i])
-                additions_ids.append(embed_id)
-                evicted_items.append(evicted)
-        if removals:
-            self.index.remove_ids(np.array(removals))
+        count_remove = max(0, (len(embeds) + self.size()) - self.capacity)
+        for i_embed, i_nn in zip(*cache_hits_indices):
+            cand = closest_ids[i_embed][i_nn]
+            cand_dist = closest_dists[i_embed][i_nn]
+            score = 1 - cand_dist / self.same_embed_distance
+            self.items[cand] += score
+        for _ in range(count_remove):
+            evicted_embed_id = min(self.items, key=self.items.get)
+            del self.items[evicted_embed_id]
+            evicted_items.append(evicted_embed_id)
+        for embed_id, embed in zip(embeds_ids, embeds):
+            self.items[embed_id] = 0
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
         if additions_ids:
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
-
+    
 class LRU(Cache):
     def __init__(self, same_embed_distance):
         super().__init__(same_embed_distance)
 
     def initialize(self, capacity: int, index):
-        # Use an OrderedDict to keep the items sorted by most recent use.
         self.items = OrderedDict()
         super().initialize(capacity, index)
 
     def request(self, embeds, embeds_ids, count_nn=1):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
-        cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.count_nonzero(mask, axis=1)
         evicted_items = []
-        removals = []
         additions_embeds = []
         additions_ids = []
-
-        for i, embed_id in enumerate(embeds_ids):
-            for i_nn in range(len(closest_ids[i])):
-                hit = False
-                evicted = embed_id
-                cand = closest_ids[i][i_nn]
-                cand_dist = closest_dists[i][i_nn]
-                if cand in self.items and cand_dist <= self.same_embed_distance:
-                    # Move the item to the end to mark it as recently used.
-                    self.items.move_to_end(cand)
-                    hit = True
-                if self.size() >= self.capacity:
-                    # Remove the least–recently used item.
-                    rem, _ = self.items.popitem(last=False)
-                    removals.append(rem)
-                    evicted = rem
-                self.items[embed_id] = None  # value not used
-                additions_embeds.append(embeds[i])
-                additions_ids.append(embed_id)
-                evicted_items.append(evicted)
-
-        if removals:
-            self.index.remove_ids(np.array(removals))
+        count_remove = max(0, (len(embeds) + self.size()) - self.capacity)
+        for i_embed, i_nn in zip(*cache_hits_indices):
+            nn = closest_ids[i_embed][i_nn]
+            self.items.move_to_end(nn)
+        for embed_id, embed in zip(embeds_ids, embeds):
+            self.items[embed_id] = None
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
         if additions_ids:
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        for _ in range(count_remove):
+            embed_id, _ = self.items.popitem()
+            evicted_items.append(embed_id)
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
         return cache_hits, evicted_items
 
 class RAP(Cache):
@@ -194,49 +176,40 @@ class RAP(Cache):
         super().__init__(same_embed_distance)
 
     def initialize(self, capacity: int, index):
-        # Again, we use a dict mapping embed_id -> frequency.
         self.items = {}
         super().initialize(capacity, index)
 
     def request(self, embeds, embeds_ids, count_nn=1):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
-        cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
-        evicted_items = []
-        removals = []
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.count_nonzero(mask, axis=1)
+        removed_items = []
+        rejected_items = []
         additions_embeds = []
         additions_ids = []
-
-        for i, embed_id in enumerate(embeds_ids):
-            for i_nn in range(len(closest_ids[i])):
-                hit = False
-                evicted = embed_id
-                cand = closest_ids[i][i_nn]
-                cand_dist = closest_dists[i][i_nn]
-                if cand in self.items and cand_dist <= self.same_embed_distance:
-                    self.items[cand] += 1
-                    hit = True
-                if self.size() >= self.capacity:
-                    # Choose the least–used candidate.
-                    candidate = min(self.items, key=self.items.get)
-                    cand_hits = self.items[candidate]
-                    thresh = 1.0 / (cand_hits + 1)
-                    # With probability (1 - thresh) do not cache the new embed.
-                    if random.random() >= thresh:
-                        evicted_items.append(embed_id)
-                        continue
-                    else:
-                        del self.items[candidate]
-                        removals.append(candidate)
-                        evicted = candidate
-                self.items[embed_id] = 1
-                additions_embeds.append(embeds[i])
-                additions_ids.append(embed_id)
-                evicted_items.append(evicted)
-        if removals:
-            self.index.remove_ids(np.array(removals))
+        for i_embed, i_nn in zip(*cache_hits_indices):
+            cand = closest_ids[i_embed][i_nn]
+            self.items[cand] += 1
+        for embed_id, embed in zip(embeds_ids, embeds):
+            if self.capacity <= self.size():
+                cand_embed_id = min(self.items, key=self.items.get)
+                cand_hits = self.items.get(cand_embed_id)
+                thresh = 1.0 / (cand_hits + 1)
+                if random.random() >= thresh:
+                    rejected_items.append(embed_id)
+                    continue
+                else:
+                    removed_items.append(cand_embed_id)
+                    self.items.pop(cand_embed_id)
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
+        if removed_items:
+            self.index.remove_ids(np.array(removed_items))
         if additions_ids:
+            self.items.update({eid: 0 for eid in additions_ids})
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
-        return cache_hits, evicted_items
+        return cache_hits, removed_items + rejected_items
 
 class FixedRadius(Cache):
     def __init__(self, same_embed_distance, radius):
