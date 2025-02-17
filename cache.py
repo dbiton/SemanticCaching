@@ -47,25 +47,53 @@ class RR(Cache):
 
     def initialize(self, capacity: int, index):
         # Use a plain dict mapping embed_id -> usage count.
-        self.items = {}
+        self.items = []
         super().initialize(capacity, index)
 
     def request(self, embeds, embeds_ids, count_nn=1):
+        assert(len(embeds) < self.capacity)
+        closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
+        cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
+        count_remove = max(0, (len(embeds) + self.size()) - self.capacity)
+        removed_indices = sorted(random.sample(range(len(self.items)), count_remove), reverse=True)
+        removals = np.array([self.items[i] for i in removed_indices])
+        for i in removed_indices:
+            self.items.pop(i)
+        if len(removals) > 0:
+            self.index.remove_ids(removals)
+        self.index.add_with_ids(embeds, embeds_ids)
+        self.items += embeds_ids
+        return cache_hits, removals
+
+
+class LFU(Cache):
+    def __init__(self, same_embed_distance):
+        super().__init__(same_embed_distance)
+
+    def initialize(self, capacity: int, index):
+        # Use a dict mapping embed_id -> frequency (access count)
+        self.items = {}
+        super().initialize(capacity, index)
+
+
+    def request(self, embeds, embeds_ids, count_nn=1):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        cache_hits_indices = np.where(closest_dists < self.same_embed_distance)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
+        removals = []
         additions_embeds = []
         additions_ids = []
-        removals = []
         for i, embed_id in enumerate(embeds_ids):
+            # too many pops!
             for i_nn in range(len(closest_ids[i])):
                 evicted = embed_id
                 cand = closest_ids[i][i_nn]
                 cand_dist = closest_dists[i][i_nn]
-                if cand in self.items and cand_dist <= self.same_embed_distance:
+                if cand_dist <= self.same_embed_distance:
                     self.items[cand] += 1
                 if self.size() >= self.capacity:
-                    rem = random.choice(list(self.items.keys()))
+                    rem = min(self.items, key=self.items.get)
                     del self.items[rem]
                     removals.append(rem)
                     evicted = rem
@@ -79,8 +107,7 @@ class RR(Cache):
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
-
-class LFU(Cache):
+class DistanceLFU(Cache):
     def __init__(self, same_embed_distance):
         super().__init__(same_embed_distance)
 
@@ -98,32 +125,26 @@ class LFU(Cache):
         additions_ids = []
         for i, embed_id in enumerate(embeds_ids):
             for i_nn in range(len(closest_ids[i])):
-                hit = False
                 evicted = embed_id
                 cand = closest_ids[i][i_nn]
                 cand_dist = closest_dists[i][i_nn]
                 if cand in self.items and cand_dist <= self.same_embed_distance:
-                    #print("LFU hit", cand, embed_id)
-                    self.items[cand] += 1
-                    hit = True
-                # Evict the least–frequently used item if the cache is full.
+                    score = 1 - cand_dist / self.same_embed_distance
+                    self.items[cand] += score
                 if self.size() >= self.capacity:
                     rem = min(self.items, key=self.items.get)
                     del self.items[rem]
                     removals.append(rem)
                     evicted = rem
-                self.items[embed_id] = 1
+                self.items[embed_id] = max(0, 1 - cand_dist / self.same_embed_distance)
                 additions_embeds.append(embeds[i])
                 additions_ids.append(embed_id)
                 evicted_items.append(evicted)
         if removals:
             self.index.remove_ids(np.array(removals))
-            #print("LFU evict", removals)
         if additions_ids:
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
-            #print("LFU add", additions_ids)
         return cache_hits, evicted_items
-
 
 class LRU(Cache):
     def __init__(self, same_embed_distance):
@@ -381,29 +402,43 @@ class OPT(Cache):
 
 
 class TinyLFU(Cache):
-    def __init__(self, same_embed_distance, window_size=0.2):
+    def __init__(self, same_embed_distance, window_size=0.05):
         super().__init__(same_embed_distance)
         self.window_size = window_size
 
+    def decay_frequencies(self):
+        evicted_items = []
+        self.sample_counter *= self.decay_factor
+        for key in list(self.freq_sketch.keys()):
+            self.freq_sketch[key] = int(self.freq_sketch[key] * self.decay_factor)
+            if self.freq_sketch[key] == 0:
+                del self.freq_sketch[key]
+                evicted_items.append(key)
+        return evicted_items
+    
     def initialize(self, capacity: int, index):
+        self.decay_factor = 0.5
+        self.sample_counter = 0
+        self.sample_size = int(10 * capacity)
         self.freq_sketch = defaultdict(int)
         self.window = deque()
         self.capacity = capacity
         self.index = index
-        self.window_capacity = int(capacity * self.window_size)
+        self.window_capacity = int(max(1, capacity * self.window_size))
         self.main_capacity = capacity - self.window_capacity
         self.main_cache = OrderedDict()
 
     def request(self, embeds, embeds_ids, count_nn=1):
-        # Look up current cached items via the index.
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
         removals = []
         additions_embeds = []
         additions_ids = []
-
         for i, embed_id in enumerate(embeds_ids):
+            self.sample_counter += 1
+            if self.sample_counter >= self.sample_size:
+                evicted_items = self.decay_frequencies()
             self.freq_sketch[embed_id] += 1
             if embed_id in self.window or embed_id in self.main_cache:
                 if embed_id in self.main_cache:
@@ -414,6 +449,10 @@ class TinyLFU(Cache):
                 additions_embeds.append(embeds[i])
                 additions_ids.append(embed_id)
             else:
+                removed_window = self.window.popleft()
+                if removed_window not in self.main_cache:
+                    removals.append(removed_window)
+                    evicted_items.append(removed_window)
                 candidate_freq = self.freq_sketch[embed_id]
                 if len(self.main_cache) < self.main_capacity:
                     self.main_cache[embed_id] = None
@@ -423,7 +462,6 @@ class TinyLFU(Cache):
                     victim, _ = next(iter(self.main_cache.items()))
                     victim_freq = self.freq_sketch[victim]
                     if candidate_freq >= victim_freq:
-                        # Admit candidate: evict the victim.
                         self.main_cache.popitem(last=False)
                         removals.append(victim)
                         evicted_items.append(victim)
@@ -432,10 +470,7 @@ class TinyLFU(Cache):
                         additions_ids.append(embed_id)
                     else:
                         evicted_items.append(embed_id)
-                removed_window = self.window.popleft()
-                if removed_window not in self.main_cache:
-                    removals.append(removed_window)
-                    evicted_items.append(removed_window)
+
         if removals:
             self.index.remove_ids(np.array(removals))
         if additions_ids:
