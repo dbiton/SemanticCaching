@@ -15,7 +15,7 @@ from sentence_transformers import SentenceTransformer
 from cache import *
 
 has_gpu = False
-run_parallel = False
+run_parallel = True
 
 def embed_strings(strings: List[str], model_name='all-MiniLM-L6-v2'):
     model = SentenceTransformer(model_name)
@@ -91,7 +91,7 @@ def process(args):
     t0 = time.time()
     for batch_embeds, i_embeds in yield_batches(embeds, batch_size):
         iter_cache_hits, evicted_embeds_ids = cache.request(batch_embeds, i_embeds, count_nn)
-        cache_hits += np.sum(np.any(iter_cache_hits))
+        cache_hits += np.count_nonzero(iter_cache_hits)
     iter_results = {
         "Cache Name": cache_name,
         "Hit Ratio": cache_hits / len(embeds),
@@ -110,7 +110,7 @@ def process_layered(args):
     index_unlimited = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
     for batch_embeds, i_embeds in yield_batches(embeds, batch_size):
         iter_cache_hits, evicted_embeds_ids = cache.request(batch_embeds, i_embeds, count_nn)
-        iter_cache_hits_count = np.sum(np.any(iter_cache_hits))
+        iter_cache_hits_count = np.count_nonzero(iter_cache_hits)
         cache_hits += iter_cache_hits_count
         if iter_cache_hits_count != len(iter_cache_hits):
             i_embeds_cache_misses = np.where(np.any(iter_cache_hits) != True)[0] + min(i_embeds)
@@ -134,7 +134,7 @@ def process_layered(args):
 def main():
     batch_size = 10
     count_nn = 10
-    num_samples = 250
+    num_samples = 10000
     for dataset_name, embeds in load_embeds():
         print(f"loaded {dataset_name}...")
         embeds = embeds[:num_samples]
