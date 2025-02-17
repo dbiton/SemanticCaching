@@ -113,7 +113,7 @@ def process_layered(args):
         iter_cache_hits_count = np.count_nonzero(iter_cache_hits)
         cache_hits += iter_cache_hits_count
         if iter_cache_hits_count != len(iter_cache_hits):
-            i_embeds_cache_misses = np.where(np.any(iter_cache_hits) != True)[0] + min(i_embeds)
+            i_embeds_cache_misses = np.where(iter_cache_hits == 0)[0] + min(i_embeds)
             batch_embeds_misses = embeds[i_embeds_cache_misses]
             distances_sqrd, neighbors = index_unlimited.search(batch_embeds_misses, 1)
             distances = np.sqrt(distances_sqrd)
@@ -140,29 +140,30 @@ def main():
         embeds = embeds[:num_samples]
         print("loaded!")
         dim = 384
-        same_embed_distance = 0.75
+        same_embed_distance = 0.5
         similar_embed_distance = 1.0
 
         caches = {
-            "OPT": OPT(same_embed_distance, embeds),
-            "TinyLFU": TinyLFU(same_embed_distance),
+            "RAP": RAP(same_embed_distance),
+            "LRU": LRU(same_embed_distance),
+            #"OPT": OPT(same_embed_distance, embeds),
+            #"TinyLFU": TinyLFU(same_embed_distance),
             #"PCA": PCA(same_embed_distance),
             "Radius": FixedRadius(same_embed_distance, similar_embed_distance),
             "Dummy": Dummy(same_embed_distance),
-            #"RR": RR(same_embed_distance),
-            "RAP": RAP(same_embed_distance),
-            "LRU": LRU(same_embed_distance),
+            "RR": RR(same_embed_distance),
+            "DistanceLFU": DistanceLFU(same_embed_distance),
             "LFU": LFU(same_embed_distance)
         }
 
         results = {}
         args = []
         for cache_name, cache in caches.items():
-            for cache_size in range(num_samples // 50, int(num_samples) // 4, int(num_samples // 50)):
+            for cache_size in range(num_samples // 40, int(num_samples) // 2, int(num_samples // 40)):
                 args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name, batch_size, count_nn))
 
         if run_parallel:
-            with ProcessPoolExecutor(8) as executor:
+            with ProcessPoolExecutor(4) as executor:
                 raw_results = chain(executor.map(process_layered, args), executor.map(process, args))
         else:
             raw_results = chain(map(process_layered, args), map(process, args))
