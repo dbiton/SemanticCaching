@@ -375,11 +375,11 @@ class OPT(Cache):
 
 
 class TinyLFU(Cache):
-    def __init__(self, same_embed_distance, window_size=0.05):
+    def __init__(self, same_embed_distance):
         super().__init__(same_embed_distance)
-        self.window_size = window_size
 
     def decay_frequencies(self):
+        #print("decay")
         evicted_items = []
         self.sample_counter *= self.decay_factor
         for key in list(self.freq_sketch.keys()):
@@ -394,59 +394,49 @@ class TinyLFU(Cache):
         self.sample_counter = 0
         self.sample_size = int(10 * capacity)
         self.freq_sketch = defaultdict(int)
-        self.window = deque()
         self.capacity = capacity
         self.index = index
-        self.window_capacity = int(max(1, capacity * self.window_size))
-        self.main_capacity = capacity - self.window_capacity
-        self.main_cache = OrderedDict()
+        self.items = OrderedDict()
 
     def request(self, embeds, embeds_ids, count_nn=1):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
-        cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
-        evicted_items = []
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.count_nonzero(mask, axis=1)
         removals = []
+        rejects = []
         additions_embeds = []
         additions_ids = []
-        for i, embed_id in enumerate(embeds_ids):
+        cache_hits_embeds_ids = [closest_ids[i][i_nn] for i, i_nn in zip(*cache_hits_indices)] + embeds_ids
+        cache_hits_embeds = [None for _ in range(len(cache_hits_indices[0]))] + list(embeds)
+        for embed_id, embed in zip(cache_hits_embeds_ids, cache_hits_embeds):
             self.sample_counter += 1
             if self.sample_counter >= self.sample_size:
-                evicted_items = self.decay_frequencies()
+                removals += self.decay_frequencies()
             self.freq_sketch[embed_id] += 1
-            if embed_id in self.window or embed_id in self.main_cache:
-                if embed_id in self.main_cache:
-                    self.main_cache.move_to_end(embed_id)
-                continue
-            if len(self.window) < self.window_capacity:
-                self.window.append(embed_id)
-                additions_embeds.append(embeds[i])
+            if embed_id in self.items:
+                self.items.move_to_end(embed_id)
+            elif self.size() <= self.capacity:
+                self.items[embed_id] = None
                 additions_ids.append(embed_id)
+                additions_embeds.append(embed)
             else:
-                removed_window = self.window.popleft()
-                if removed_window not in self.main_cache:
-                    removals.append(removed_window)
-                    evicted_items.append(removed_window)
-                candidate_freq = self.freq_sketch[embed_id]
-                if len(self.main_cache) < self.main_capacity:
-                    self.main_cache[embed_id] = None
-                    additions_embeds.append(embeds[i])
+                victim_embed_id, _ = next(iter(self.items.items()))
+                victim_freq = self.freq_sketch[victim_embed_id]
+                embed_freq = self.freq_sketch[embed_id]
+                if embed_freq >= victim_freq:
+                    self.items.popitem(last=False)
+                    removals.append(victim_embed_id)
+                    self.items[embed_id] = None
                     additions_ids.append(embed_id)
+                    additions_embeds.append(embed)
                 else:
-                    victim, _ = next(iter(self.main_cache.items()))
-                    victim_freq = self.freq_sketch[victim]
-                    if candidate_freq >= victim_freq:
-                        self.main_cache.popitem(last=False)
-                        removals.append(victim)
-                        evicted_items.append(victim)
-                        self.main_cache[embed_id] = None
-                        additions_embeds.append(embeds[i])
-                        additions_ids.append(embed_id)
-                    else:
-                        evicted_items.append(embed_id)
-
+                    rejects.append(embed_id)
         if removals:
+            #print("remove", removals)
             self.index.remove_ids(np.array(removals))
         if additions_ids:
+            #print("add", additions_ids)
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
 
-        return cache_hits, evicted_items
+        return cache_hits, removals + rejects
