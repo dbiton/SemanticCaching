@@ -326,10 +326,24 @@ class PCA(Cache):
 class OPT(Cache):
     def __init__(self, same_embed_distance, embeds):
         super().__init__(same_embed_distance)
-        self.embeds_distances = distance_matrix(embeds, embeds)
-        self.embeds_covers = (self.embeds_distances <= same_embed_distance).astype(int)
-        tri_l = np.tril_indices_from(self.embeds_covers)
-        self.embeds_covers[tri_l] = 0
+        self.embeds_covers = self.create_embeds_covers_faiss(embeds, same_embed_distance)
+
+    def create_embeds_covers_faiss(self, embeds, same_embed_distance):
+        embeds = np.asarray(embeds, dtype=np.float32)
+        n, d = embeds.shape
+        index = faiss.IndexFlatL2(d)
+        index.add(embeds)
+        threshold = same_embed_distance ** 2
+        lims, distances, indices = index.range_search(embeds, threshold)
+        embeds_covers = np.zeros((n, n), dtype=int)
+        for i in range(n):
+            start = lims[i]
+            end = lims[i + 1]
+            for pos in range(start, end):
+                j = indices[pos]
+                if j > i:
+                    embeds_covers[i, j] = 1
+        return embeds_covers
 
     def initialize(self, capacity: int, index):
         self.items = {}
