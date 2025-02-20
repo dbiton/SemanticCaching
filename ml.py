@@ -2,9 +2,9 @@ import os
 import pickle
 import time
 import numpy as np
-from sklearn.metrics import precision_score
+from sklearn.metrics import mean_squared_error  
 from sklearn.model_selection import train_test_split
-from xgboost import XGBClassifier
+from xgboost import XGBClassifier, XGBRegressor
 from scipy.spatial import distance_matrix
 import faiss
 
@@ -29,27 +29,24 @@ def load_embeds():
                 )
             yield dataset_name, embeds
 
-def next_hits(embeds_covers, curr_embed_id, embeds_ids):
-    """
-    For each index in embeds_ids, find the index of the next 'hit' (where the cover is 1).
-    If no hit exists in the future window, return np.inf.
-    """
+def get_next_hits(embeds_covers, curr_embed_id, embeds_ids):
     start = curr_embed_id + 1
     n = embeds_covers.shape[1]
-    # If there is no "future" (e.g. last embedding), return np.inf for all.
     if start >= n:
         return np.full(len(embeds_ids), np.inf)
-    # Only consider columns from start onward.
     v = embeds_covers[embeds_ids, start:]
-    # Create a boolean mask for rows that contain at least one hit.
     has_hit = np.any(v, axis=1)
-    # Initialize result with np.inf
     hit_indices = np.full(len(embeds_ids), np.inf)
     if np.any(has_hit):
-        # np.argmax returns the index of the first maximum along the axis.
         first_hits = np.argmax(v, axis=1)
         hit_indices[has_hit] = first_hits[has_hit]
     return hit_indices + start
+
+def get_prev_hits(embeds_covers, curr_embed_id, embeds_ids):
+    start = curr_embed_id + 1
+    rel_covers = embeds_covers[embeds_ids, :start]
+    prev_hits = [np.nonzero(row)[0] for row in rel_covers]
+    return prev_hits
 
 def create_embeds_covers_distance_matrix(embeds, same_embed_distance):
     embeds_distances = distance_matrix(embeds, embeds)
@@ -75,21 +72,48 @@ def create_embeds_covers_faiss(embeds, same_embed_distance):
                 embeds_covers[i, j] = 1
     return embeds_covers
 
+def extract_labels(embeds_covers, curr_embed_id, cached_embeds_ids, window_size):
+    next_hits = get_next_hits(embeds_covers, curr_embed_id, cached_embeds_ids)
+    next_hits = next_hits - curr_embed_id
+    next_hits[next_hits > window_size] = 2 * window_size
+    return np.log(next_hits)
+
+def pad_array(arr, N, v):
+    current_length = arr.shape[0]
+    if current_length < N:
+        pad_length = N - current_length
+        return np.pad(arr, (pad_length, 0), mode='constant', constant_values=v)
+    elif current_length > N:
+        return arr[-N:]
+    return arr
+
+def extract_features(cached_embeds, curr_embed_id, cached_embeds_ids):
+    DELTAS_COUNT = 8
+    past_hits = get_prev_hits(embeds_covers, curr_embed_id, cached_embeds_ids)
+    past_hits = [pad_array(v, DELTAS_COUNT, -1 + curr_embed_id) for v in past_hits]
+    past_hits = np.array(past_hits)
+    past_hits = past_hits - curr_embed_id
+    return np.array(past_hits)
+
 if __name__ == "__main__":
-    clf = XGBClassifier(objective='binary:logistic', random_state=42)
-    same_embed_distance = 1.0
+    reg = XGBRegressor(objective='reg:squarederror', random_state=42)
+    same_embed_distance = 0.75
     for dataset_name, embeds in load_embeds():
         print(f"Processing dataset: {dataset_name}")
         embeds_covers = create_embeds_covers_faiss(embeds, same_embed_distance)
         step = 1000
         X_chunks = []
         y_chunks = []
-        for i in range(0, len(embeds), step):
-            embeds_chunk = embeds[i:i+step]
-            X_chunks.append(embeds_chunk)
+        for i in range(0, len(embeds) - 2*step, step):
             upper = min(i + step, len(embeds))
-            res = next_hits(embeds_covers, i, list(range(i, upper))) < upper
-            y_chunks.append(res)
+            windows_size = step
+            embeds_ids = list(range(i, upper))
+            embeds_chunk = embeds[i:i+step]
+            features = extract_features(embeds_chunk, upper, embeds_ids)
+            X_chunks.append(features)
+            labels = extract_labels(embeds_covers, upper, embeds_ids, windows_size)
+            y_chunks.append(labels)
+            print("processed", i, "embeds")
         print(len(X_chunks), "chunks created")
         X_flat = np.vstack(X_chunks)
         y_flat = np.concatenate(y_chunks)
@@ -97,9 +121,9 @@ if __name__ == "__main__":
             raise ValueError("Mismatch between number of samples in X and y")
         print(f"Dataset {dataset_name}: {X_flat.shape[0]} samples with {X_flat.shape[1]} features")
         X_train, X_test, y_train, y_test = train_test_split(X_flat, y_flat, test_size=0.2, random_state=42)
-        clf.fit(X_train, y_train)
+        reg.fit(X_train, y_train)
         print(f"Finished training on dataset: {dataset_name}\n")
-        y_pred = clf.predict(X_test)
-        accuracy = precision_score(y_test, y_pred)
-        print(f"Dataset {dataset_name} accuracy on validation set: {accuracy:.4f}\n")
+        y_pred = reg.predict(X_test)
+        mse = mean_squared_error(y_test, y_pred)
+        print(f"Dataset {dataset_name} MSE on validation set: {mse:.4f}\n")
 
