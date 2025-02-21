@@ -44,7 +44,7 @@ def get_prev_hits(embeds_covers, curr_embed_id, embeds_ids):
     prev_hits = []
     for row in rel_covers:
         idx = row.searchsorted(curr_embed_id, side='right')
-        prev_hits.append(row[idx:])
+        prev_hits.append(row[:idx])
     return np.array(prev_hits, dtype='object')
 
 def create_embeds_covers_distance_matrix(embeds, same_embed_distance):
@@ -85,19 +85,19 @@ def pad_array(arr, N, v):
 def extract_features(cached_embeds, curr_embed_id, cached_embeds_ids):
     DELTAS_COUNT = 8
     past_hits = get_prev_hits(embeds_covers, curr_embed_id, cached_embeds_ids)
-    past_hits = [pad_array(v, DELTAS_COUNT, -1 + curr_embed_id) for v in past_hits]
+    past_hits = [pad_array(v, DELTAS_COUNT, 1 + curr_embed_id) for v in past_hits]
     past_hits = np.array(past_hits)
     past_hits = past_hits - curr_embed_id
     return np.array(past_hits)
 
 if __name__ == "__main__":
     reg = XGBRegressor(objective='reg:squarederror', random_state=42)
-    same_embed_distance = 0.75
+    same_embed_distance = 0.5
     for dataset_name, embeds in load_embeds():
-        embeds = embeds[:1000]
+        embeds = embeds[:30000]
         print(f"Processing dataset: {dataset_name}")
         embeds_covers = create_embeds_covers_faiss(embeds, same_embed_distance)
-        step = 100
+        step = 1000
         X_chunks = []
         y_chunks = []
         for i in range(0, len(embeds) - 2*step, step):
