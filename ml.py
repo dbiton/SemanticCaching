@@ -88,7 +88,12 @@ def extract_features(cached_embeds, curr_embed_id, cached_embeds_ids):
     past_hits = [pad_array(v, DELTAS_COUNT, 1 + curr_embed_id) for v in past_hits]
     past_hits = np.array(past_hits)
     past_hits = past_hits - curr_embed_id
-    return np.array(past_hits)
+    deltas = np.array(past_hits)
+    edc = np.stack([
+        np.sum(2 ** (deltas / (2 ** (9 + i))), axis=1)
+        for i in range(DELTAS_COUNT)
+    ], axis=1)
+    return np.hstack([deltas, edc])
 
 if __name__ == "__main__":
     reg = XGBRegressor(objective='reg:squarederror', random_state=42)
