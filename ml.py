@@ -1,3 +1,4 @@
+from collections import defaultdict
 import os
 import pickle
 import time
@@ -30,23 +31,21 @@ def load_embeds():
             yield dataset_name, embeds
 
 def get_next_hits(embeds_covers, curr_embed_id, embeds_ids):
-    start = curr_embed_id + 1
-    n = embeds_covers.shape[1]
-    if start >= n:
-        return np.full(len(embeds_ids), np.inf)
-    v = embeds_covers[embeds_ids, start:]
-    has_hit = np.any(v, axis=1)
-    hit_indices = np.full(len(embeds_ids), np.inf)
-    if np.any(has_hit):
-        first_hits = np.argmax(v, axis=1)
-        hit_indices[has_hit] = first_hits[has_hit]
-    return hit_indices + start
+    rel_covers = embeds_covers[embeds_ids]
+    next_hits = np.full(len(embeds_ids), np.inf)
+    for i_row, row in enumerate(rel_covers):
+        idx = row.searchsorted(curr_embed_id, side='right')
+        if idx < len(row):
+            next_hits[i_row] = row[idx]
+    return next_hits
 
 def get_prev_hits(embeds_covers, curr_embed_id, embeds_ids):
-    start = curr_embed_id + 1
-    rel_covers = embeds_covers[embeds_ids, :start]
-    prev_hits = [np.nonzero(row)[0] for row in rel_covers]
-    return prev_hits
+    rel_covers = embeds_covers[embeds_ids]
+    prev_hits = []
+    for row in rel_covers:
+        idx = row.searchsorted(curr_embed_id, side='right')
+        prev_hits.append(row[idx:])
+    return np.array(prev_hits, dtype='object')
 
 def create_embeds_covers_distance_matrix(embeds, same_embed_distance):
     embeds_distances = distance_matrix(embeds, embeds)
@@ -61,16 +60,12 @@ def create_embeds_covers_faiss(embeds, same_embed_distance):
     index = faiss.IndexFlatL2(d)
     index.add(embeds)
     threshold = same_embed_distance ** 2
-    lims, distances, indices = index.range_search(embeds, threshold)
-    embeds_covers = np.zeros((n, n), dtype=int)
+    lims, _, indices = index.range_search(embeds, threshold)
+    embeds_covers = []
     for i in range(n):
-        start = lims[i]
-        end = lims[i + 1]
-        for pos in range(start, end):
-            j = indices[pos]
-            if j > i:
-                embeds_covers[i, j] = 1
-    return embeds_covers
+        i_covers = np.sort(np.array([j for j in indices[lims[i]:lims[i+1]] if j > i]))
+        embeds_covers.append(i_covers)
+    return np.array(embeds_covers, dtype=object)
 
 def extract_labels(embeds_covers, curr_embed_id, cached_embeds_ids, window_size):
     next_hits = get_next_hits(embeds_covers, curr_embed_id, cached_embeds_ids)
@@ -99,9 +94,10 @@ if __name__ == "__main__":
     reg = XGBRegressor(objective='reg:squarederror', random_state=42)
     same_embed_distance = 0.75
     for dataset_name, embeds in load_embeds():
+        embeds = embeds[:1000]
         print(f"Processing dataset: {dataset_name}")
         embeds_covers = create_embeds_covers_faiss(embeds, same_embed_distance)
-        step = 1000
+        step = 100
         X_chunks = []
         y_chunks = []
         for i in range(0, len(embeds) - 2*step, step):
