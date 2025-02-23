@@ -82,8 +82,16 @@ def pad_array(arr, N, v):
         return arr[-N:]
     return arr
 
+def embed_pca_to_cluster_id(self, cluster_diameter, embed_pca):
+    unit_hypercube_diameter = np.sqrt(self.pca_dim)
+    hypercube_side_length = cluster_diameter / unit_hypercube_diameter
+    cluster_id = np.round(embed_pca / hypercube_side_length).astype(int)
+    return tuple(cluster_id)
+
 def extract_features(cached_embeds, curr_embed_id, cached_embeds_ids):
     DELTAS_COUNT = 8
+    PCA_DIM = 9
+    CLUSTER_DIAMETER = 1.0
     past_hits = get_prev_hits(embeds_covers, curr_embed_id, cached_embeds_ids)
     past_hits = [pad_array(v, DELTAS_COUNT, 1 + curr_embed_id) for v in past_hits]
     past_hits = np.array(past_hits)
@@ -93,6 +101,15 @@ def extract_features(cached_embeds, curr_embed_id, cached_embeds_ids):
         np.sum(2 ** (deltas / (2 ** (9 + i))), axis=1)
         for i in range(DELTAS_COUNT)
     ], axis=1)
+    pca = faiss.PCAMatrix(cached_embeds, PCA_DIM)
+    pca.train(embeds)
+    assert pca.is_trained
+    embeds_pca = pca.apply(embeds)
+    clusters = defaultdict(int)
+    for embed_id, embed_pca in zip(embeds_ids, embeds_pca):
+        cluster_id = embed_pca_to_cluster_id(CLUSTER_DIAMETER, embed_pca)
+        clusters[cluster_id] += 1
+    static_features = None
     return np.hstack([deltas, edc])
 
 if __name__ == "__main__":
