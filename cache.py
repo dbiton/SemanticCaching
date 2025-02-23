@@ -326,24 +326,20 @@ class PCA(Cache):
 class OPT(Cache):
     def __init__(self, same_embed_distance, embeds):
         super().__init__(same_embed_distance)
-        self.embeds_covers = self.create_embeds_covers_faiss(embeds, same_embed_distance)
+        self.embeds_covers = self.create_embeds_covers(embeds, same_embed_distance)
 
-    def create_embeds_covers_faiss(self, embeds, same_embed_distance):
+    def create_embeds_covers(self, embeds, same_embed_distance):
         embeds = np.asarray(embeds, dtype=np.float32)
         n, d = embeds.shape
         index = faiss.IndexFlatL2(d)
         index.add(embeds)
         threshold = same_embed_distance ** 2
-        lims, distances, indices = index.range_search(embeds, threshold)
-        embeds_covers = np.zeros((n, n), dtype=int)
+        lims, _, indices = index.range_search(embeds, threshold)
+        embeds_covers = []
         for i in range(n):
-            start = lims[i]
-            end = lims[i + 1]
-            for pos in range(start, end):
-                j = indices[pos]
-                if j > i:
-                    embeds_covers[i, j] = 1
-        return embeds_covers
+            i_covers = np.sort(np.array([j for j in indices[lims[i]:lims[i+1]] if j > i]))
+            embeds_covers.append(i_covers)
+        return np.array(embeds_covers, dtype=object)
 
     def initialize(self, capacity: int, index):
         self.items = {}
@@ -352,13 +348,11 @@ class OPT(Cache):
     
     def get_next_hit(self, embed_id):
         row = self.embeds_covers[embed_id]
-        i = self.curr_embed_id
-        sub_row = row[i+1:]
-        if np.any(sub_row):
-            return np.argmax(sub_row) + (i + 1)
-        else:
-            return float('inf')
-        
+        idx = row.searchsorted(self.curr_embed_id, side='right')
+        if idx < len(row):
+            return row[idx]
+        return np.inf
+    
     def request(self, embeds, embeds_ids, count_nn=1):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
@@ -454,3 +448,67 @@ class TinyLFU(Cache):
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
 
         return cache_hits, removals + rejects
+
+class OPT_Legacy(Cache):
+    def __init__(self, same_embed_distance, embeds):
+        super().__init__(same_embed_distance)
+        self.embeds_covers = self.create_embeds_covers(embeds, same_embed_distance)
+
+    def create_embeds_covers(self, embeds, same_embed_distance):
+        embeds = np.asarray(embeds, dtype=np.float32)
+        n, d = embeds.shape
+        index = faiss.IndexFlatL2(d)
+        index.add(embeds)
+        threshold = same_embed_distance ** 2
+        lims, distances, indices = index.range_search(embeds, threshold)
+        embeds_covers = np.zeros((n, n), dtype=int)
+        for i in range(n):
+            start = lims[i]
+            end = lims[i + 1]
+            for pos in range(start, end):
+                j = indices[pos]
+                if j > i:
+                    embeds_covers[i, j] = 1
+        return embeds_covers
+
+    def initialize(self, capacity: int, index):
+        self.items = {}
+        self.curr_embed_id = 0
+        super().initialize(capacity, index)
+    
+    def get_next_hit(self, embed_id):
+        row = self.embeds_covers[embed_id]
+        i = self.curr_embed_id
+        sub_row = row[i+1:]
+        if np.any(sub_row):
+            return np.argmax(sub_row) + (i + 1)
+        else:
+            return float('inf')
+        
+    def request(self, embeds, embeds_ids, count_nn=1):
+        closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
+        evicted_items = []
+        rejected_items = []
+        additions = []
+        for i_embed, (embed, embed_id) in enumerate(zip(embeds, embeds_ids)):
+            self.curr_embed_id = embed_id
+            embed_next_hit = self.get_next_hit(embed_id)
+            self.items = {eid: self.get_next_hit(eid) if next_hit <= self.curr_embed_id else next_hit for eid, next_hit in self.items.items()}
+            max_next_hit_embed_id = max(self.items, key=self.items.get, default=None)
+            max_next_hit = self.items.get(max_next_hit_embed_id, float('inf'))
+            if self.capacity > self.size() or (embed_next_hit < max_next_hit and embed_next_hit not in self.items.values()):
+                if self.capacity <= self.size():
+                    evicted_items.append(max_next_hit_embed_id)
+                    self.items.pop(max_next_hit_embed_id, None)
+                self.items[embed_id] = embed_next_hit
+                additions.append((embed_id, embed))
+            else: 
+                rejected_items.append(embed_id)
+        if additions:
+            additions_embeds = [v for (_, v) in additions]
+            additions_ids = [v for (v, _) in additions]
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
+        return cache_hits, evicted_items + rejected_items
