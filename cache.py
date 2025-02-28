@@ -346,23 +346,29 @@ class OPT(Cache):
         self.curr_embed_id = 0
         super().initialize(capacity, index)
     
-    def get_next_hit(self, embed_id):
-        row = self.embeds_covers[embed_id]
-        idx = row.searchsorted(self.curr_embed_id, side='right')
-        if idx < len(row):
-            return row[idx]
-        return np.inf
+    def get_next_hits(self, embeds_ids):
+        curr_id = self.curr_embed_id
+        next_hits = {}
+        for embed_id, row in zip(embeds_ids, self.embeds_covers[embeds_ids]):
+            i = row.searchsorted(curr_id, side='right')
+            next_hits[embed_id] = i if i < len(row) else np.inf
+        return next_hits
     
     def request(self, embeds, embeds_ids, count_nn=1):
-        closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
         rejected_items = []
         additions = []
-        for i_embed, (embed, embed_id) in enumerate(zip(embeds, embeds_ids)):
+        
+        stale_items = [eid for (eid, next_hit) in self.items.items() if next_hit < self.curr_embed_id]
+        if len(stale_items) > 0:
+            self.items.update(self.get_next_hits(stale_items))
+        
+        embeds_next_hits = self.get_next_hits(embeds_ids)
+        for embed, embed_id in zip(embeds, embeds_ids):
+            embed_next_hit = embeds_next_hits[embed_id] 
             self.curr_embed_id = embed_id
-            embed_next_hit = self.get_next_hit(embed_id)
-            self.items = {eid: self.get_next_hit(eid) if next_hit <= self.curr_embed_id else next_hit for eid, next_hit in self.items.items()}
             max_next_hit_embed_id = max(self.items, key=self.items.get, default=None)
             max_next_hit = self.items.get(max_next_hit_embed_id, float('inf'))
             if self.capacity > self.size() or (embed_next_hit < max_next_hit and embed_next_hit not in self.items.values()):
