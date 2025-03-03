@@ -1,13 +1,47 @@
-from collections import defaultdict
 import os
 import pickle
-import time
 import numpy as np
 from sklearn.metrics import mean_squared_error  
 from sklearn.model_selection import train_test_split
-from xgboost import XGBClassifier, XGBRegressor
+from xgboost import XGBRegressor
 from scipy.spatial import distance_matrix
 import faiss
+
+class RegOPT:
+    def __init__(self):
+        self.reg = XGBRegressor(objective='reg:squarederror', device="cuda", verbosity="2", random_state=42)
+        self.same_embed_distance = 0.5
+    
+    def train(self, embeds):
+        embeds_covers = create_embeds_covers_faiss(embeds, self.same_embed_distance)
+        step = 1000
+        X_chunks = []
+        y_chunks = []
+        for i in range(0, len(embeds) - 2*step, step):
+            upper = min(i + step, len(embeds))
+            windows_size = step
+            embeds_ids = list(range(i, upper))
+            embeds_chunk = embeds[i:i+step]
+            features = extract_features(embeds_covers, upper, embeds_ids)
+            X_chunks.append(features)
+            labels = extract_labels(embeds_covers, upper, embeds_ids, windows_size)
+            y_chunks.append(labels)
+            print("processed", i, "embeds")
+        print(len(X_chunks), "chunks created")
+        X_flat = np.vstack(X_chunks)
+        y_flat = np.concatenate(y_chunks)
+        if X_flat.shape[0] != y_flat.shape[0]:
+            raise ValueError("Mismatch between number of samples in X and y")
+        print(f"Dataset {dataset_name}: {X_flat.shape[0]} samples with {X_flat.shape[1]} features")
+        X_train, X_test, y_train, y_test = train_test_split(X_flat, y_flat, test_size=0.2, random_state=42)
+        self.reg.fit(X_train, y_train)
+        print(f"Finished training on dataset: {dataset_name}\n")
+        y_pred = self.reg.predict(X_test)
+        mse = mean_squared_error(y_test, y_pred)
+        print(f"Dataset {dataset_name} MSE on validation set: {mse:.4f}\n")
+    
+    def predict(self, X):
+        return self.reg.predict(X)
 
 def load_embeds():
     filenames = {
@@ -30,12 +64,14 @@ def load_embeds():
                 )
             yield dataset_name, embeds
 
+
+
 def get_next_hits(embeds_covers, curr_embed_id, embeds_ids):
     rel_covers = embeds_covers[embeds_ids]
     next_hits = np.full(len(embeds_ids), np.inf)
     for i_row, row in enumerate(rel_covers):
         idx = row.searchsorted(curr_embed_id, side='right')
-        if idx < len(row):
+        if len(row) > idx and len(row) > 0:
             next_hits[i_row] = row[idx]
     return next_hits
 
@@ -88,7 +124,7 @@ def embed_pca_to_cluster_id(self, cluster_diameter, embed_pca):
     cluster_id = np.round(embed_pca / hypercube_side_length).astype(int)
     return tuple(cluster_id)
 
-def extract_features(cached_embeds, curr_embed_id, cached_embeds_ids):
+def extract_features(embeds_covers, curr_embed_id, cached_embeds_ids):
     DELTAS_COUNT = 8
     PCA_DIM = 9
     CLUSTER_DIAMETER = 1.0
@@ -101,47 +137,9 @@ def extract_features(cached_embeds, curr_embed_id, cached_embeds_ids):
         np.sum(2 ** (deltas / (2 ** (9 + i))), axis=1)
         for i in range(DELTAS_COUNT)
     ], axis=1)
-    pca = faiss.PCAMatrix(cached_embeds, PCA_DIM)
-    pca.train(embeds)
-    assert pca.is_trained
-    embeds_pca = pca.apply(embeds)
-    clusters = defaultdict(int)
-    for embed_id, embed_pca in zip(embeds_ids, embeds_pca):
-        cluster_id = embed_pca_to_cluster_id(CLUSTER_DIAMETER, embed_pca)
-        clusters[cluster_id] += 1
-    static_features = None
     return np.hstack([deltas, edc])
-
 if __name__ == "__main__":
-    reg = XGBRegressor(objective='reg:squarederror', random_state=42)
-    same_embed_distance = 0.5
     for dataset_name, embeds in load_embeds():
-        embeds = embeds[:30000]
-        print(f"Processing dataset: {dataset_name}")
-        embeds_covers = create_embeds_covers_faiss(embeds, same_embed_distance)
-        step = 1000
-        X_chunks = []
-        y_chunks = []
-        for i in range(0, len(embeds) - 2*step, step):
-            upper = min(i + step, len(embeds))
-            windows_size = step
-            embeds_ids = list(range(i, upper))
-            embeds_chunk = embeds[i:i+step]
-            features = extract_features(embeds_chunk, upper, embeds_ids)
-            X_chunks.append(features)
-            labels = extract_labels(embeds_covers, upper, embeds_ids, windows_size)
-            y_chunks.append(labels)
-            print("processed", i, "embeds")
-        print(len(X_chunks), "chunks created")
-        X_flat = np.vstack(X_chunks)
-        y_flat = np.concatenate(y_chunks)
-        if X_flat.shape[0] != y_flat.shape[0]:
-            raise ValueError("Mismatch between number of samples in X and y")
-        print(f"Dataset {dataset_name}: {X_flat.shape[0]} samples with {X_flat.shape[1]} features")
-        X_train, X_test, y_train, y_test = train_test_split(X_flat, y_flat, test_size=0.2, random_state=42)
-        reg.fit(X_train, y_train)
-        print(f"Finished training on dataset: {dataset_name}\n")
-        y_pred = reg.predict(X_test)
-        mse = mean_squared_error(y_test, y_pred)
-        print(f"Dataset {dataset_name} MSE on validation set: {mse:.4f}\n")
-
+        reg = RegOPT()
+        print(f"Processing dataset: {dataset_name}, length: {len(embeds)}")
+        reg.train(embeds)

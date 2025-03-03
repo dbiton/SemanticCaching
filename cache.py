@@ -413,7 +413,7 @@ class RelaxedOPT(Cache):
 
     def initialize(self, capacity: int, index):
         self.items = {}
-        self.belady_boundary = 0
+        self.belady_boundary = np.inf
         self.curr_embed_id = 0
         super().initialize(capacity, index)
     
@@ -451,7 +451,9 @@ class RelaxedOPT(Cache):
                     evicted_eid = evict_cands.pop()
                 else:
                     evicted_eid = max(self.items, key=self.items.get, default=None)
-                evicted_next_hit = self.items.get(evicted_eid, 0)
+                evicted_next_hit = self.items.get(evicted_eid, np.inf)
+                if evicted_next_hit < np.inf:
+                    x = 3
                 self.belady_boundary = min(self.belady_boundary, evicted_next_hit)
                 evicted_items.append(evicted_eid)
                 self.items.pop(evicted_eid, None)
