@@ -16,6 +16,7 @@ from cache import *
 
 has_gpu = False
 run_parallel = True
+NUM_PROCS = 4
 
 def embed_strings(strings: List[str], model_name='all-MiniLM-L6-v2'):
     model = SentenceTransformer(model_name)
@@ -132,9 +133,9 @@ def process_layered(args):
     return iter_results
 
 def main():
-    batch_size = 10
-    count_nn = 10
-    num_samples = 10000
+    batch_size = 1
+    count_nn = 1
+    num_samples = 5000
     for dataset_name, embeds in load_embeds():
         print(f"loaded {dataset_name}...")
         embeds = embeds[:num_samples]
@@ -142,17 +143,17 @@ def main():
         dim = 384
         same_embed_distance = 0.5
         similar_embed_distance = 1.0
-
         caches = {
+            "RelaxedOPT": RelaxedOPT(same_embed_distance, embeds),
+            "OPT": OPT(same_embed_distance, embeds),
+            #"TinyLFU": TinyLFU(same_embed_distance),
             "RAP": RAP(same_embed_distance),
             "LRU": LRU(same_embed_distance),
-            #"OPT": OPT(same_embed_distance, embeds),
-            #"TinyLFU": TinyLFU(same_embed_distance),
             #"PCA": PCA(same_embed_distance),
             "Radius": FixedRadius(same_embed_distance, similar_embed_distance),
             "Dummy": Dummy(same_embed_distance),
             "RR": RR(same_embed_distance),
-            "DistanceLFU": DistanceLFU(same_embed_distance),
+            #"DistanceLFU": DistanceLFU(same_embed_distance),
             "LFU": LFU(same_embed_distance)
         }
 
@@ -163,7 +164,7 @@ def main():
                 args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name, batch_size, count_nn))
 
         if run_parallel:
-            with ProcessPoolExecutor(4) as executor:
+            with ProcessPoolExecutor(NUM_PROCS) as executor:
                 raw_results = chain(executor.map(process_layered, args), executor.map(process, args))
         else:
             raw_results = chain(map(process_layered, args), map(process, args))

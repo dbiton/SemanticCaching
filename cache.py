@@ -351,7 +351,10 @@ class OPT(Cache):
         next_hits = {}
         for embed_id, row in zip(embeds_ids, self.embeds_covers[embeds_ids]):
             i = row.searchsorted(curr_id, side='right')
-            next_hits[embed_id] = i if i < len(row) else np.inf
+            next_hit = np.inf
+            if len(row) > 0 and len(row) > i:
+                next_hit = row[i]
+            next_hits[embed_id] = next_hit
         return next_hits
     
     def request(self, embeds, embeds_ids, count_nn=1):
@@ -379,6 +382,81 @@ class OPT(Cache):
                 additions.append((embed_id, embed))
             else: 
                 rejected_items.append(embed_id)
+        if additions:
+            additions_embeds = [v for (_, v) in additions]
+            additions_ids = [v for (v, _) in additions]
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
+        return cache_hits, evicted_items + rejected_items
+
+class RelaxedOPT(Cache):
+    def __init__(self, same_embed_distance, embeds):
+        super().__init__(same_embed_distance)
+        self.embeds_covers = self.create_embeds_covers(embeds, same_embed_distance)
+
+    def get_belady_boundary(self):
+        return self.belady_boundary
+    
+    def create_embeds_covers(self, embeds, same_embed_distance):
+        embeds = np.asarray(embeds, dtype=np.float32)
+        n, d = embeds.shape
+        index = faiss.IndexFlatL2(d)
+        index.add(embeds)
+        threshold = same_embed_distance ** 2
+        lims, _, indices = index.range_search(embeds, threshold)
+        embeds_covers = []
+        for i in range(n):
+            i_covers = np.sort(np.array([j for j in indices[lims[i]:lims[i+1]] if j > i]))
+            embeds_covers.append(i_covers)
+        return np.array(embeds_covers, dtype=object)
+
+    def initialize(self, capacity: int, index):
+        self.items = {}
+        self.belady_boundary = 0
+        self.curr_embed_id = 0
+        super().initialize(capacity, index)
+    
+    def get_next_hits(self, embeds_ids):
+        curr_id = self.curr_embed_id
+        next_hits = {}
+        for embed_id, row in zip(embeds_ids, self.embeds_covers[embeds_ids]):
+            i = row.searchsorted(curr_id, side='right')
+            next_hit = np.inf
+            if len(row) > 0 and len(row) > i:
+                next_hit = row[i]
+            next_hits[embed_id] = next_hit
+        return next_hits
+    
+    def request(self, embeds, embeds_ids, count_nn=1):
+        closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
+        cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
+        evicted_items = []
+        rejected_items = []
+        additions = []
+        
+        stale_items = [eid for (eid, next_hit) in self.items.items() if next_hit < self.curr_embed_id]
+        if len(stale_items) > 0:
+            self.items.update(self.get_next_hits(stale_items))
+        
+        embeds_next_hits = self.get_next_hits(embeds_ids)
+        belady_boundary = self.get_belady_boundary()
+        evict_cands = [eid for eid, next_hit in self.items.items() if next_hit > belady_boundary]
+        random.shuffle(evict_cands)
+        for embed, embed_id in zip(embeds, embeds_ids):
+            embed_next_hit = embeds_next_hits[embed_id] 
+            self.curr_embed_id = embed_id
+            if self.capacity <= self.size():
+                if len(evict_cands) > 0:
+                    evicted_eid = evict_cands.pop()
+                else:
+                    evicted_eid = max(self.items, key=self.items.get, default=None)
+                evicted_next_hit = self.items.get(evicted_eid, 0)
+                self.belady_boundary = min(self.belady_boundary, evicted_next_hit)
+                evicted_items.append(evicted_eid)
+                self.items.pop(evicted_eid, None)
+            self.items[embed_id] = embed_next_hit
+            additions.append((embed_id, embed))
         if additions:
             additions_embeds = [v for (_, v) in additions]
             additions_ids = [v for (v, _) in additions]
