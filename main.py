@@ -13,9 +13,10 @@ import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from cache import *
+from OPT import RelaxedLearnedOPT, RelaxedOPT, OPT
 
 has_gpu = False
-run_parallel = True
+run_parallel = False
 NUM_PROCS = 4
 
 def embed_strings(strings: List[str], model_name='all-MiniLM-L6-v2'):
@@ -135,7 +136,7 @@ def process_layered(args):
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 5000
+    num_samples = 20000
     for dataset_name, embeds in load_embeds():
         print(f"loaded {dataset_name}...")
         embeds = embeds[:num_samples]
@@ -144,14 +145,15 @@ def main():
         same_embed_distance = 0.5
         similar_embed_distance = 1.0
         caches = {
-            "RelaxedOPT": RelaxedOPT(same_embed_distance, embeds),
+            "RL_OPT": RelaxedLearnedOPT(same_embed_distance),
+            "R_OPT": RelaxedOPT(same_embed_distance, embeds),
             "OPT": OPT(same_embed_distance, embeds),
             #"TinyLFU": TinyLFU(same_embed_distance),
             "RAP": RAP(same_embed_distance),
             "LRU": LRU(same_embed_distance),
             #"PCA": PCA(same_embed_distance),
-            "Radius": FixedRadius(same_embed_distance, similar_embed_distance),
-            "Dummy": Dummy(same_embed_distance),
+            #"Radius": FixedRadius(same_embed_distance, similar_embed_distance),
+            #"Dummy": Dummy(same_embed_distance),
             "RR": RR(same_embed_distance),
             #"DistanceLFU": DistanceLFU(same_embed_distance),
             "LFU": LFU(same_embed_distance)
@@ -159,8 +161,11 @@ def main():
 
         results = {}
         args = []
+        COUNT_STEPS = 10
+        MAX_CACHE_SIZE = 0.1
         for cache_name, cache in caches.items():
-            for cache_size in range(num_samples // 40, int(num_samples) // 2, int(num_samples // 40)):
+            step_size = int(num_samples * MAX_CACHE_SIZE // COUNT_STEPS)
+            for cache_size in range(step_size, int(num_samples * MAX_CACHE_SIZE), step_size):
                 args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name, batch_size, count_nn))
 
         if run_parallel:

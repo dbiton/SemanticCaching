@@ -137,7 +137,8 @@ def extract_features(embeds_covers, curr_embed_id, cached_embeds_ids):
         np.sum(2 ** (deltas / (2 ** (9 + i))), axis=1)
         for i in range(DELTAS_COUNT)
     ], axis=1)
-    return np.hstack([deltas, edc])
+    return deltas
+    #return np.hstack([deltas, edc])
 if __name__ == "__main__":
     for dataset_name, embeds in load_embeds():
         reg = RegOPT()
