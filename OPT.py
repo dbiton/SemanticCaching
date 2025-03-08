@@ -76,7 +76,8 @@ class RelaxedOPT(Cache):
         self.embeds_covers = self.create_embeds_covers(embeds, same_embed_distance)
 
     def get_belady_boundary(self):
-        return self.belady_boundary
+        BELADY_BOUNDARY_COE = 4
+        return self.capacity * BELADY_BOUNDARY_COE
     
     def create_embeds_covers(self, embeds, same_embed_distance):
         embeds = np.asarray(embeds, dtype=np.float32)
@@ -121,7 +122,7 @@ class RelaxedOPT(Cache):
         
         embeds_next_hits = self.get_next_hits(embeds_ids)
         belady_boundary = self.get_belady_boundary()
-        evict_cands = [eid for eid, next_hit in self.items.items() if next_hit > belady_boundary]
+        evict_cands = [eid for eid, next_hit in self.items.items() if next_hit > self.curr_embed_id + belady_boundary]
         np.random.shuffle(evict_cands)
         for embed, embed_id in zip(embeds, embeds_ids):
             embed_next_hit = embeds_next_hits[embed_id] 
@@ -131,8 +132,6 @@ class RelaxedOPT(Cache):
                     evicted_eid = evict_cands.pop()
                 else:
                     evicted_eid = max(self.items, key=self.items.get, default=None)
-                evicted_next_hit = self.items.get(evicted_eid, np.inf)
-                self.belady_boundary = min(self.belady_boundary, evicted_next_hit)
                 evicted_items.append(evicted_eid)
                 self.items.pop(evicted_eid, None)
             self.items[embed_id] = embed_next_hit
@@ -162,7 +161,7 @@ class RelaxedLearnedOPT(Cache):
         super().initialize(capacity, index)
     
     def train_reg(self):
-        pass
+        x = 3
     
     def request(self, embeds, embeds_ids, count_nn=1):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
