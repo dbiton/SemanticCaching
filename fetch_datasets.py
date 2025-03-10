@@ -2,6 +2,7 @@ import os
 import pickle
 import random
 import pandas as pd
+import numpy as np
 import tqdm
 from typing import *
 from datasets import load_dataset
@@ -12,6 +13,7 @@ from tempfile import NamedTemporaryFile
 embeds_dir = "datasets"
 
 # dataset specific params
+steam_full = False
 steam_limit = 100000
 steam_seed = 0
 
@@ -104,18 +106,28 @@ if __name__ == "__main__":
             embeds_chat = embed_strings(questions_chat)
             pickle.dump(embeds_chat, f)
     
-    print("generating steam...")
-    with writer(os.path.join(embeds_dir, "embeds_steam.pkl")) as f:
-        if f is not None:
-            import kagglehub
-            print(f"Downloading dataset if needed... This can take a long time if the raw dataset has not been downloaded!")
-            path = kagglehub.dataset_download("kieranpoc/steam-reviews/versions/2")
-            print(f"Dataset is available at {path}")
-            csv_path = os.path.join(path, "all_reviews", "all_reviews.csv")
-            print(f"Sampling from full: {csv_path}")
-            df = sample_from_csv(csv_path, 113883709, steam_limit, seed=steam_seed)
-            df.sort_values("timestamp_created", inplace=True)
-            df.reset_index(drop=True, inplace=True)
-            reviews_steam = df['review']
-            embeds_steam = embed_strings(reviews_steam)
-            pickle.dump(embeds_steam, f)
+    if steam_full:
+        print("generating steam...")
+        with writer(os.path.join(embeds_dir, f"embeds_steam_{steam_limit}_{steam_seed}.parquet")) as f:
+            if f is not None:
+                import kagglehub
+                print(f"Downloading dataset if needed... This can take a long time if the raw dataset has not been downloaded!")
+                path = kagglehub.dataset_download("kieranpoc/steam-reviews/versions/2")
+                print(f"Dataset is available at {path}")
+                csv_path = os.path.join(path, "all_reviews", "all_reviews.csv")
+                print(f"Sampling from full: {csv_path}")
+                df = sample_from_csv(csv_path, 113883709, steam_limit, seed=steam_seed)
+                df = df[["timestamp_created","appid","review"]]
+                df.sort_values("timestamp_created", inplace=True)
+                df.reset_index(drop=True, inplace=True)
+                reviews_steam = df['review']
+                embeds_steam = embed_strings(reviews_steam)
+                df["embed"] = embeds_steam.tolist()
+                pd.DataFrame(df).to_parquet(f)
+    else:
+        print("loading steam...")
+        with writer(os.path.join(embeds_dir, "embeds_steam.pkl")) as f:
+            if f is not None:
+                ds_steam = load_dataset("alongoldenberg/steam-reviews")
+                embeds_steam = np.array(ds_steam['train']['embed'])
+                pickle.dump(embeds_steam, f)
