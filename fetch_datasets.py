@@ -3,7 +3,7 @@ import pickle
 import random
 import pandas as pd
 import tqdm
-from typing import List, Dict, Iterable
+from typing import *
 from datasets import load_dataset
 from sentence_transformers import SentenceTransformer
 from contextlib import contextmanager
@@ -81,7 +81,7 @@ def writer(path):
 
 if __name__ == "__main__":
     print("generating bing...")
-    with open(os.path.join(embeds_dir, "embeds_bing.pkl"), "wb") as f:
+    with writer(os.path.join(embeds_dir, "embeds_bing.pkl")) as f:
         if f is not None:
             ds_bing = load_dataset("corbyrosset/researchy_questions")
             questions_bing = ds_bing['train']['question']
