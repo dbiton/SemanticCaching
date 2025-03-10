@@ -1,6 +1,7 @@
 import heapq
 import random
 from collections import OrderedDict, defaultdict, deque
+import heapq
 import numpy as np
 from scipy.spatial import distance_matrix
 import faiss
@@ -137,7 +138,60 @@ class DistanceLFU(Cache):
         if additions_ids:
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
+
+class DynamicAgingDistanceLFU(Cache):
+    def __init__(self, same_embed_distance, cand_dist_multiplier: float = 1):
+        assert 0 <= cand_dist_multiplier <= 1, "cand_dist_multiplier must be in [0, 1]"
+        super().__init__(same_embed_distance)
+        self.cand_dist_multiplier = cand_dist_multiplier
+
+    def initialize(self, capacity: int, index):
+        self.items = {}
+        self.epoch = 0  # might be bad if epoch can increase indefinitely
+        super().initialize(capacity, index)
     
+    def _aged_score(self, items_entry):
+        embed_id, (hit_score, age) = items_entry
+        return hit_score / (self.epoch - age + 1)
+    
+    def request(self, embeds, embeds_ids, count_nn=1):
+        closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.sum(mask, axis=1)
+        evicted_items = []
+        additions_embeds = []
+        additions_ids = []
+        count_remove = max(0, (len(embeds) + self.size()) - self.capacity)
+        for i_embed, i_nn in zip(*cache_hits_indices):
+            cand = closest_ids[i_embed][i_nn]
+            cand_dist = closest_dists[i_embed][i_nn]
+            norm_cand_dist = self.cand_dist_multiplier * cand_dist / self.same_embed_distance
+            hit_score = 1 - norm_cand_dist
+            prev_hits, prev_epoch = self.items.get(cand, (0, self.epoch))
+            new_hits = prev_hits + hit_score
+            new_epoch = self.epoch  # prev_epoch*norm_cand_dist + self.epoch*(1-norm_cand_dist)
+            self.items[cand] = (new_hits, new_epoch)
+        # nsmallest <-> "for _ in range(count_remove): ..."
+        evicted_items = heapq.nsmallest(count_remove, self.items.items(), key=self._aged_score)
+        evicted_items = [embed_id for embed_id, _ in evicted_items]
+        for embed_id, embed in zip(embeds_ids, embeds):
+            self.items[embed_id] = (0, self.epoch)
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
+        if evicted_items:
+            for embed_id in evicted_items:
+                del self.items[embed_id]
+            self.index.remove_ids(np.array(evicted_items))
+        if additions_ids:
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        self.epoch += 1
+        return cache_hits, evicted_items
+
+class DynamicAgingLFU(DynamicAgingDistanceLFU):
+    def __init__(self, same_embed_distance):
+        super().__init__(same_embed_distance, cand_dist_multiplier=0)
+
 class LRU(Cache):
     def __init__(self, same_embed_distance):
         super().__init__(same_embed_distance)
