@@ -139,7 +139,7 @@ class DistanceLFU(Cache):
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
-class DynamicAgingDistanceLFU(Cache):
+class DynamicAgingLFU(Cache):
     def __init__(self, same_embed_distance, cand_dist_multiplier: float = 1):
         assert 0 <= cand_dist_multiplier <= 1, "cand_dist_multiplier must be in [0, 1]"
         super().__init__(same_embed_distance)
@@ -151,8 +151,8 @@ class DynamicAgingDistanceLFU(Cache):
         super().initialize(capacity, index)
     
     def _aged_score(self, items_entry):
-        embed_id, (hit_score, age) = items_entry
-        return hit_score / (self.epoch - age + 1)
+        embed_id, (hit_score, last_epoch) = items_entry
+        return hit_score / (self.epoch - last_epoch + 1)
     
     def request(self, embeds, embeds_ids, count_nn=1):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
@@ -175,6 +175,10 @@ class DynamicAgingDistanceLFU(Cache):
         # nsmallest <-> "for _ in range(count_remove): ..."
         evicted_items = heapq.nsmallest(count_remove, self.items.items(), key=self._aged_score)
         evicted_items = [embed_id for embed_id, _ in evicted_items]
+        for i_embed, i_nn in zip(*cache_hits_indices):
+            cand = closest_ids[i_embed][i_nn]
+            new_hits, _ = self.items[cand]
+            self.items[cand] = (new_hits, self.epoch)
         for embed_id, embed in zip(embeds_ids, embeds):
             self.items[embed_id] = (0, self.epoch)
             additions_embeds.append(embed)
@@ -188,9 +192,53 @@ class DynamicAgingDistanceLFU(Cache):
         self.epoch += 1
         return cache_hits, evicted_items
 
-class DynamicAgingLFU(DynamicAgingDistanceLFU):
-    def __init__(self, same_embed_distance):
-        super().__init__(same_embed_distance, cand_dist_multiplier=0)
+class PeriodicAgingLFU(Cache):
+    def __init__(self, same_embed_distance, *, aging_interval: int = 1000, aging_factor: float = 0.5, cand_dist_multiplier: float = 1):
+        assert 0 <= cand_dist_multiplier <= 1, "cand_dist_multiplier must be in [0, 1]"
+        assert 0 <= aging_factor <= 1, "aging_factor must be in [0, 1]"
+        assert isinstance(aging_interval, int) and aging_interval > 0, "aging_interval must be a positive integer"
+        super().__init__(same_embed_distance)
+        self.cand_dist_multiplier = cand_dist_multiplier
+        self.aging_interval = aging_interval
+        self.aging_factor = aging_factor
+
+    def initialize(self, capacity: int, index):
+        self.items = {}
+        self.time_since_aging = 0  # might be bad if epoch can increase indefinitely
+        super().initialize(capacity, index)
+
+    def request(self, embeds, embeds_ids, count_nn=1):
+        closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.sum(mask, axis=1)
+        evicted_items = []
+        additions_embeds = []
+        additions_ids = []
+        count_remove = max(0, (len(embeds) + self.size()) - self.capacity)
+        for i_embed, i_nn in zip(*cache_hits_indices):
+            cand = closest_ids[i_embed][i_nn]
+            cand_dist = closest_dists[i_embed][i_nn]
+            hit_score = 1 - self.cand_dist_multiplier * cand_dist / self.same_embed_distance
+            self.items[cand] += hit_score
+        # nsmallest <-> "for _ in range(count_remove): ..."
+        evicted_items = heapq.nsmallest(count_remove, self.items, key=self.items.get)
+        for embed_id in evicted_items:
+            del self.items[embed_id]
+        for embed_id, embed in zip(embeds_ids, embeds):
+            self.items[embed_id] = 0
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
+        if additions_ids:
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        self.time_since_aging += 1
+        if self.time_since_aging == self.aging_interval:
+            self.time_since_aging = 0
+            for embed_id in self.items:
+                self.items[embed_id] *= self.aging_factor
+        return cache_hits, evicted_items
 
 class LRU(Cache):
     def __init__(self, same_embed_distance):
