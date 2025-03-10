@@ -12,39 +12,19 @@ from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
+import tqdm
 from cache import *
 from OPT import RelaxedLearnedOPT, RelaxedOPT, OPT
 
+dataset_filenames = {
+    "Bing": "datasets/embeds_bing.pkl",
+    "StackOverflow": "datasets/embeds_so.pkl",
+    "WildChat": "datasets/embeds_chat.pkl",
+    "Steam": "datasets/embeds_steam.pkl",
+}
 has_gpu = False
 run_parallel = False
 NUM_PROCS = 4
-
-def embed_strings(strings: List[str], model_name='all-MiniLM-L6-v2'):
-    model = SentenceTransformer(model_name)
-    embeddings = model.encode(strings, convert_to_numpy=True)
-    return embeddings
-
-def load_data_long(n: None):
-    with open("prompts.json", "r") as f:
-        data = json.load(f)
-        origin = [v["text_a"] for v in data if v["label"] == 1]
-        similar = [v["text_b"] for v in data if v["label"] == 1]
-        if n:
-            indices = sample(list(range(len(origin))), n)
-            origin = [origin[i] for i in indices]
-            similar = [similar[i] for i in indices]
-        return origin, similar
-
-def load_data_short():
-    with open("mock_data.json", "r") as f:
-        return json.load(f)
-
-def embed_titles(n=-1):
-    with open("Titles.txt", encoding="utf-8") as f:
-        titles_strings = f.readlines(n)
-    titles_embeddings = [e.tolist() for e in embed_strings(titles_strings)]
-    with open("TitlesEmbeddings.json", "w") as f:
-        json.dump(list(zip(titles_strings, titles_embeddings)), f)
 
 def plot(dataset_name, results):
     for prop_name, prop_results in results.items():
@@ -69,14 +49,11 @@ def generate_embeds(mean, std_dev, dim, length):
     return [np.random.normal(mean, std_dev, dim) for _ in range(length)]
 
 def load_embeds():
-    filenames = {
-        "Bing": "embeds_bing.pkl",
-        "StackOverflow": "embeds_so.pkl",
-        "WildChat": "embeds_chat.pkl"
-    }
-    embeds_dir = "datasets"
-    for dataset_name, filename in filenames.items():
-        with open(os.path.join(embeds_dir, filename), "rb") as f:
+    for dataset_name, path in dataset_filenames.items():
+        if not os.path.exists(path):
+            print(f"Skipping \"{path}\" because it does not exist")
+            continue
+        with open(path, "rb") as f:
             embeds = pickle.load(f)
             yield dataset_name, embeds
 
@@ -86,7 +63,7 @@ def yield_batches(lst, k):
 
 
 def process(args):
-    (cache, cache_size, dim, embeds, cache_name, batch_size, count_nn) = args
+    (pbar, cache, cache_size, dim, embeds, cache_name, batch_size, count_nn) = args
     index = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
     cache.initialize(cache_size, index)
     cache_hits = 0
@@ -94,6 +71,7 @@ def process(args):
     for batch_embeds, i_embeds in yield_batches(embeds, batch_size):
         iter_cache_hits, evicted_embeds_ids = cache.request(batch_embeds, i_embeds, count_nn)
         cache_hits += np.count_nonzero(iter_cache_hits)
+        if pbar is not None: pbar.update(1)
     iter_results = {
         "Cache Name": cache_name,
         "Hit Ratio": cache_hits / len(embeds),
@@ -103,7 +81,7 @@ def process(args):
     return iter_results
 
 def process_layered(args):
-    (cache, cache_size, dim, embeds, cache_name, batch_size, count_nn) = args
+    (pbar, cache, cache_size, dim, embeds, cache_name, batch_size, count_nn) = args
     index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
     cache.initialize(cache_size, index)
     cache_hits = 0
@@ -123,6 +101,7 @@ def process_layered(args):
         if len(evicted_embeds_ids) > 0:
             evicted_embed = embeds[evicted_embeds_ids]
             index_unlimited.add_with_ids(evicted_embed, np.array(evicted_embeds_ids))
+        if pbar is not None: pbar.update(1)
     iter_results = {
         "Cache Name": cache_name,
         "Hit Ratio L1+L2": (cache_hits + l2_cache_hits) / len(embeds),
@@ -156,7 +135,8 @@ def main():
             #"Dummy": Dummy(same_embed_distance),
             "RR": RR(same_embed_distance),
             #"DistanceLFU": DistanceLFU(same_embed_distance),
-            "LFU": LFU(same_embed_distance)
+            "LFU": LFU(same_embed_distance),
+            "DALFU": PeriodicAgingLFU(same_embed_distance, aging_interval=720, aging_factor=0.5),
         }
 
         results = {}
@@ -167,6 +147,13 @@ def main():
             step_size = int(num_samples * MAX_CACHE_SIZE // COUNT_STEPS)
             for cache_size in range(step_size, int(num_samples * MAX_CACHE_SIZE), step_size):
                 args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name, batch_size, count_nn))
+        num_batches = sum([len(embeds)/batch_size for _, _, _, embeds, _, batch_size, _ in args])
+        if run_parallel:
+            pbar = tqdm.tqdm(total=2*len(args), desc=f"Processing {dataset_name} with {num_batches} batches")
+            args = [(None, *arg) for arg in args]
+        else:
+            pbar = tqdm.tqdm(total=2*num_batches, desc=f"Processing {dataset_name} with {num_batches} batches")
+            args = [(pbar, *arg) for arg in args]
 
         if run_parallel:
             with ProcessPoolExecutor(NUM_PROCS) as executor:
@@ -175,6 +162,7 @@ def main():
             raw_results = chain(map(process_layered, args), map(process, args))
 
         for iter_results in raw_results:
+            if run_parallel: pbar.update(1)
             for prop_name, prop in iter_results.items():
                 cache_name = iter_results['Cache Name']
                 cache_size = iter_results['Cache Size']
