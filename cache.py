@@ -5,6 +5,7 @@ import heapq
 import numpy as np
 from scipy.spatial import distance_matrix
 import faiss
+from data_structures import CumsumDeque
 
 
 class Cache:
@@ -238,6 +239,74 @@ class PeriodicAgingLFU(Cache):
             self.time_since_aging = 0
             for embed_id in self.items:
                 self.items[embed_id] *= self.aging_factor
+        return cache_hits, evicted_items
+
+class StableDynamicAgingLFU(Cache):
+    def __init__(self, same_embed_distance, cand_dist_multiplier: float = 1):
+        assert 0 <= cand_dist_multiplier <= 1, "cand_dist_multiplier must be in [0, 1]"
+        super().__init__(same_embed_distance)
+        self.cand_dist_multiplier = cand_dist_multiplier
+
+    def initialize(self, capacity: int, index):
+        self.items = {}
+        self.epoch = 0  # might be bad if epoch can increase indefinitely
+        self.max_hits = CumsumDeque(capacity*10)
+        super().initialize(capacity, index)
+    
+    def _aged_score(self, items_entry):
+        embed_id, (hit_score, last_epoch) = items_entry
+        return hit_score / (self.epoch - last_epoch + 1)
+    
+    def request(self, embeds, embeds_ids, count_nn=1):
+        closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.sum(mask, axis=1)
+        evicted_items = []
+        additions_embeds = []
+        additions_ids = []
+        count_remove = max(0, (len(embeds) + self.size()) - self.capacity)
+        max_hit = -np.inf
+        max_hits_mean = self.max_hits.mean()
+        hit_scores = [0 for _ in range(len(embeds))]
+        for i_embed, i_nn in zip(*cache_hits_indices):
+            cand = closest_ids[i_embed][i_nn]
+            cand_dist = closest_dists[i_embed][i_nn]
+            norm_cand_dist = self.cand_dist_multiplier * cand_dist / self.same_embed_distance
+            hit_score = 1 - norm_cand_dist
+            hit_scores[i_embed] = max(hit_scores[i_embed], hit_score)
+            max_hit = max(max_hit, hit_score)
+            prev_hits, prev_epoch = self.items[cand]
+            new_hits = prev_hits + hit_score
+            new_epoch = self.epoch*hit_score + prev_epoch*(1-hit_score)
+            self.items[cand] = (new_hits, new_epoch)
+        # nsmallest <-> "for _ in range(count_remove): ..."
+        evicted_items = heapq.nsmallest(count_remove, self.items.items(), key=self._aged_score)
+        evicted_items = [embed_id for embed_id, _ in evicted_items]
+        for i_embed, i_nn in zip(*cache_hits_indices):
+            cand = closest_ids[i_embed][i_nn]
+            new_hits, _ = self.items[cand]
+            self.items[cand] = (new_hits, self.epoch)
+        for i_embed, (embed_id, embed) in enumerate(zip(embeds_ids, embeds)):
+            max_hit = hit_scores[i_embed]
+            self.max_hits.append(max_hit)
+            # avg cand_dist < self.same_embed_distance is equiv to:
+            # (1-max_hits_mean)*self.same_embed_distance/self.cand_dist_multiplier < self.same_embed_distance
+            # equiv to (1-max_hits_mean) < self.cand_dist_multiplier
+            usually_miss = (1 - max_hits_mean) < self.cand_dist_multiplier
+            hit_more_than_usual = max_hit > max_hits_mean
+            if False and usually_miss and hit_more_than_usual:
+                continue
+            self.items[embed_id] = (0, self.epoch)
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
+        if evicted_items:
+            for embed_id in evicted_items:
+                del self.items[embed_id]
+            self.index.remove_ids(np.array(evicted_items))
+        if additions_ids:
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        self.epoch += 1
         return cache_hits, evicted_items
 
 class LRU(Cache):
