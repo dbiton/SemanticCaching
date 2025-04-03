@@ -15,6 +15,7 @@ from sentence_transformers import SentenceTransformer
 import tqdm
 from cache import *
 from OPT import RelaxedLearnedOPT, RelaxedOPT, OPT
+from reduce_dim import reduce_dim
 
 dataset_filenames = {
     "Bing": "datasets/embeds_bing.pkl",
@@ -23,8 +24,7 @@ dataset_filenames = {
     "Steam": "datasets/embeds_steam.pkl",
 }
 has_gpu = False
-run_parallel = False
-NUM_PROCS = 4
+NUM_PROCS = 6
 
 def plot(dataset_name, results):
     for prop_name, prop_results in results.items():
@@ -115,16 +115,17 @@ def process_layered(args):
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 20000
+    num_samples = 2000
+    dim = 10
     for dataset_name, embeds in load_embeds():
+        embeds = reduce_dim(embeds, dim)
         print(f"loaded {dataset_name}...")
         embeds = embeds[:num_samples]
         print("loaded!")
-        dim = 384
         same_embed_distance = 0.5
         similar_embed_distance = 1.0
         caches = {
-            "RL_OPT": RelaxedLearnedOPT(same_embed_distance),
+            "RL_OPT": RelaxedLearnedOPT(same_embed_distance, dim=dim),
             "R_OPT": RelaxedOPT(same_embed_distance, embeds),
             "OPT": OPT(same_embed_distance, embeds),
             #"TinyLFU": TinyLFU(same_embed_distance),
@@ -148,21 +149,19 @@ def main():
             for cache_size in range(step_size, int(num_samples * MAX_CACHE_SIZE), step_size):
                 args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name, batch_size, count_nn))
         num_batches = sum([len(embeds)/batch_size for _, _, _, embeds, _, batch_size, _ in args])
-        if run_parallel:
+        if NUM_PROCS > 1:
             pbar = tqdm.tqdm(total=2*len(args), desc=f"Processing {dataset_name} with {num_batches} batches")
             args = [(None, *arg) for arg in args]
-        else:
-            pbar = tqdm.tqdm(total=2*num_batches, desc=f"Processing {dataset_name} with {num_batches} batches")
-            args = [(pbar, *arg) for arg in args]
-
-        if run_parallel:
             with ProcessPoolExecutor(NUM_PROCS) as executor:
                 raw_results = chain(executor.map(process_layered, args), executor.map(process, args))
         else:
+            pbar = tqdm.tqdm(total=2*num_batches, desc=f"Processing {dataset_name} with {num_batches} batches")
+            args = [(pbar, *arg) for arg in args]
             raw_results = chain(map(process_layered, args), map(process, args))
-
+            
         for iter_results in raw_results:
-            if run_parallel: pbar.update(1)
+            if NUM_PROCS > 1: 
+                pbar.update(1)
             for prop_name, prop in iter_results.items():
                 cache_name = iter_results['Cache Name']
                 cache_size = iter_results['Cache Size']
