@@ -76,14 +76,13 @@ class OPT(Cache):
 
 
 class RelaxedOPT(Cache):
-
-    def __init__(self, same_embed_distance, embeds):
+    def __init__(self, same_embed_distance, embeds, belady_boundary_coe=2.0):
         super().__init__(same_embed_distance)
         self.embeds_covers = self.create_embeds_covers(embeds, same_embed_distance)
+        self.belady_boundary_coe=belady_boundary_coe
 
     def get_belady_boundary(self):
-        BELADY_BOUNDARY_COE = 2
-        return self.capacity * BELADY_BOUNDARY_COE
+        return self.capacity * self.belady_boundary_coe
     
     def create_embeds_covers(self, embeds, same_embed_distance):
         embeds = np.asarray(embeds, dtype=np.float32)
@@ -160,15 +159,15 @@ def pad_array(arr, N, v):
     return arr
 
 class RelaxedLearnedOPT(Cache):
-    def __init__(self, same_embed_distance, deltas_count=4, train_capacity_ratio=1.0, dim = 384):
+    def __init__(self, same_embed_distance, deltas_count=4, train_capacity_ratio=1.0, belady_boundary_coe = 2.0, dim = 384):
         super().__init__(same_embed_distance)
         self.dim = dim
+        self.belady_boundary_coe = belady_boundary_coe
         self.deltas_count = deltas_count
         self.train_capacity_ratio = train_capacity_ratio 
 
     def get_belady_boundary(self):
-        BELADY_BOUNDARY_COE = 4
-        return self.capacity * BELADY_BOUNDARY_COE
+        return self.capacity * self.belady_boundary_coe
 
     def initialize(self, capacity: int, index):
         self.items = OrderedDict()
