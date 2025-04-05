@@ -160,9 +160,9 @@ def pad_array(arr, N, v):
     return arr
 
 class RelaxedLearnedOPT(Cache):
-
-    def __init__(self, same_embed_distance, deltas_count=4, train_capacity_ratio=1.0):
+    def __init__(self, same_embed_distance, deltas_count=4, train_capacity_ratio=1.0, dim = 384):
         super().__init__(same_embed_distance)
+        self.dim = dim
         self.deltas_count = deltas_count
         self.train_capacity_ratio = train_capacity_ratio 
 
@@ -177,8 +177,7 @@ class RelaxedLearnedOPT(Cache):
         self.reg = None
         self.train_capacity = int(self.train_capacity_ratio * capacity)
         self.training_data = {}
-        dim = 384
-        self.index_train = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
+        self.index_train = faiss.IndexIDMap2(faiss.IndexFlatL2(self.dim))
         super().initialize(capacity, index)
     
     def train_reg(self):
@@ -187,8 +186,7 @@ class RelaxedLearnedOPT(Cache):
         X = np.array(data['features'].tolist())
         y = data['label'].to_list()
         self.reg.fit(X, y)
-        dim = 384
-        self.index_train = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
+        self.index_train = faiss.IndexIDMap2(faiss.IndexFlatL2(self.dim))
         self.training_data = {}
     
     def get_features(self, embeds_ids, embeds, with_labels=False):
