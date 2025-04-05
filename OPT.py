@@ -183,26 +183,37 @@ class RelaxedLearnedOPT(Cache):
         print("training!")
         self.reg = XGBRegressor(objective='reg:squarederror', verbosity="2", random_state=42)
         data = pd.DataFrame(self.training_data.values())
-        X = np.array(data['features'].tolist())
-        y = data['label'].to_list()
+        X = np.array(data[0].tolist())
+        default_label = np.log2(2 * self.train_capacity)
+        y = data[1].fillna(default_label).to_list()
         self.reg.fit(X, y)
         self.index_train = faiss.IndexIDMap2(faiss.IndexFlatL2(self.dim))
         self.training_data = {}
     
     def get_features(self, embeds_ids, embeds):
         dists, ids = self.index_train.search(embeds, self.deltas_count)
-        result = {}
+        dists = np.sqrt(dists)
+        features = {}
+        cache_hits = {}
         for i, embed_id in enumerate(embeds_ids):
-            embed_relative_hits = np.where(ids[i] != -1, embed_id - ids[i], -1)
+            embed_relative_hits = np.where(ids[i] != -1, ids[i] - embed_id, -1)
             embed_dists = dists[i]
-            result[embed_id] = np.hstack((embed_relative_hits, embed_dists))
-        return result
+            cache_hits_indice = np.where(embed_dists <= self.same_embed_distance)
+            cache_hits_embeds_ids = ids[i][cache_hits_indice]
+            deltas = pad_array(np.diff(np.sort(cache_hits_embeds_ids)), self.deltas_count, -1)
+            features[embed_id] = np.hstack((embed_relative_hits, embed_dists, deltas))
+            cache_hits[embed_id] = cache_hits_embeds_ids
+        return features, cache_hits
     
     def record_for_training(self, embeds_ids, embeds):
+        features, cache_hits = self.get_features(embeds_ids, embeds)
+        for embed_id, embed_cache_hits in cache_hits.items():
+            self.training_data[embed_id] = [features[embed_id], None]
+            for cache_hit_embed_id in embed_cache_hits:
+                entry = self.training_data.get(cache_hit_embed_id, None)
+                if entry is not None and entry[1] is None:
+                    entry[1] = np.log2(embed_id - cache_hit_embed_id)
         self.index_train.add_with_ids(embeds, np.array(embeds_ids))
-        self.training_data.update(
-            {eid: e for eid, e in zip(embeds_ids, embeds)}
-        )
     
     def evict(self):
         if self.reg:
@@ -212,9 +223,8 @@ class RelaxedLearnedOPT(Cache):
             else:
                 indice = list(range(len(self.items)))
             embeds_ids, embeds = np.array(list(self.items.keys()))[indice], np.array(list(self.items.values()))[indice]
-            data = self.get_features(embeds_ids, embeds)
-            data = pd.DataFrame(data.values())
-            X = np.array(data['features'].tolist())
+            features, _ = self.get_features(embeds_ids, embeds)
+            X = np.array(list(features.values()))
             y = self.reg.predict(X)
             cands = np.where(y < np.log(self.get_belady_boundary()))
             if len(cands) > 0:

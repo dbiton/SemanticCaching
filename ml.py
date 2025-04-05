@@ -65,8 +65,8 @@ def yield_batches(lst, k):
 if __name__ == "__main__":
     DIM = 384
     DELTAS_COUNT = 8
-    STREAM_SIZE = 10000
-    CACHE_SIZE = 1000
+    STREAM_SIZE = 90000
+    CACHE_SIZE = 9000
     BATCH_SIZE = 16
     COUNT_NN = 1
     SAME_EMBED_DISTANCE = 1.0
