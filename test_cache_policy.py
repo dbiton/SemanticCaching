@@ -3,8 +3,8 @@ import numpy as np
 import pytest
 import faiss
 
-from cache import OPT, LFU
-
+from cache import LFU
+from OPT import OPT
 
 def test_opt_two_clusters():
     count_region1 = 256
@@ -32,8 +32,6 @@ def test_opt_two_clusters():
         lfu_cache_hits += np.sum(lfu.request(embed.reshape(1, -1), [embed_id])[0])
     print("LFU", lfu_cache_hits, "OPT", opt_cache_hits)
     assert lfu_cache_hits <= opt_cache_hits
-
-from scipy.spatial import distance_matrix
 
 def test_wildchat():
     embeds_path = "datasets/embeds_chat.pkl"

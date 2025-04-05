@@ -189,26 +189,20 @@ class RelaxedLearnedOPT(Cache):
         self.index_train = faiss.IndexIDMap2(faiss.IndexFlatL2(self.dim))
         self.training_data = {}
     
-    def get_features(self, embeds_ids, embeds, with_labels=False):
-        threshold = self.same_embed_distance ** 2
-        lims, distances, indices = self.index_train.range_search(embeds, threshold)
+    def get_features(self, embeds_ids, embeds):
+        dists, ids = self.index_train.search(embeds, self.deltas_count)
         result = {}
         for i, embed_id in enumerate(embeds_ids):
-            start = lims[i]
-            end = lims[i + 1]
-            hits = pad_array(indices[start:end], self.deltas_count, -1)
-            relative_hits = np.where(hits != -1, embed_id - hits, hits)
-            dists = pad_array(distances[start:end], self.deltas_count, -1)
-            result[embed_id] = {"features": np.hstack((relative_hits, dists))} 
-            if with_labels:
-                result[embed_id]["label"] = np.log(self.train_capacity * 2)
-                for i in indices[start:end]:
-                    self.training_data[i]['label'] = min(self.training_data[i]['label'], np.log(embed_id - i)) 
+            embed_relative_hits = np.where(ids[i] != -1, embed_id - ids[i], -1)
+            embed_dists = dists[i]
+            result[embed_id] = np.hstack((embed_relative_hits, embed_dists))
         return result
-      
+    
     def record_for_training(self, embeds_ids, embeds):
-        self.training_data.update(self.get_features(embeds_ids, embeds, with_labels=True))
         self.index_train.add_with_ids(embeds, np.array(embeds_ids))
+        self.training_data.update(
+            {eid: e for eid, e in zip(embeds_ids, embeds)}
+        )
     
     def evict(self):
         if self.reg:
@@ -218,27 +212,28 @@ class RelaxedLearnedOPT(Cache):
             else:
                 indice = list(range(len(self.items)))
             embeds_ids, embeds = np.array(list(self.items.keys()))[indice], np.array(list(self.items.values()))[indice]
-            data = self.get_features(embeds_ids, embeds, with_labels=False)
+            data = self.get_features(embeds_ids, embeds)
             data = pd.DataFrame(data.values())
             X = np.array(data['features'].tolist())
             y = self.reg.predict(X)
             cands = np.where(y < np.log(self.get_belady_boundary()))
             if len(cands) > 0:
-                evicted_eids = list(embeds_ids[cands])
+                evicted_eids = embeds_ids[cands]
             else:
-                evicted_eids = [embeds_ids[np.random.choice(embeds_ids)]]
+                evicted_eids = np.random.choice(embeds_ids, size=batch_size, replace=False)
             for eid in evicted_eids:
                 self.items.pop(eid)
-            return evicted_eids
+            return list(evicted_eids)
         else:
-            return self.items.popitem(last=False)[0]
+            return [self.items.popitem(last=False)[0]]
             
     
     def request(self, embeds, embeds_ids, count_nn=1):
-        closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
-        cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
+        closest_dists, closest_embeds_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        self.get_features(embeds_ids, embeds)
         self.record_for_training(embeds_ids, embeds)
-        if len(self.training_data) >= self.train_capacity:
+        cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
+        if self.index_train.ntotal >= self.train_capacity:
             self.train_reg()
         evicted_items = []
         rejected_items = []
