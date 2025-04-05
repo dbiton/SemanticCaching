@@ -171,6 +171,7 @@ class RelaxedLearnedOPT(Cache):
 
     def initialize(self, capacity: int, index):
         self.items = OrderedDict()
+        self.labeled_count = 0
         self.belady_boundary = np.inf
         self.curr_embed_id = 0
         self.reg = None
@@ -187,8 +188,13 @@ class RelaxedLearnedOPT(Cache):
         default_label = np.log2(2 * self.train_capacity)
         y = data[1].fillna(default_label).to_list()
         self.reg.fit(X, y)
-        self.index_train = faiss.IndexIDMap2(faiss.IndexFlatL2(self.dim))
-        self.training_data = {}
+        self.remove_labeled_from_training()
+    
+    def remove_labeled_from_training(self):
+        removed_embeds_ids = [eid for (eid, entry) in self.training_data.items() if entry[1] is not None]
+        self.training_data = {k: v for (k, v) in self.training_data.items() if k not in removed_embeds_ids}
+        self.index_train.remove_ids(np.array(removed_embeds_ids))
+        self.labeled_count = 0
     
     def get_features(self, embeds_ids, embeds):
         dists, ids = self.index_train.search(embeds, self.deltas_count)
@@ -201,6 +207,7 @@ class RelaxedLearnedOPT(Cache):
             cache_hits_indice = np.where(embed_dists <= self.same_embed_distance)
             cache_hits_embeds_ids = ids[i][cache_hits_indice]
             deltas = pad_array(np.diff(np.sort(cache_hits_embeds_ids)), self.deltas_count, -1)
+            edc = []
             features[embed_id] = np.hstack((embed_relative_hits, embed_dists, deltas))
             cache_hits[embed_id] = cache_hits_embeds_ids
         return features, cache_hits
@@ -212,6 +219,7 @@ class RelaxedLearnedOPT(Cache):
             for cache_hit_embed_id in embed_cache_hits:
                 entry = self.training_data.get(cache_hit_embed_id, None)
                 if entry is not None and entry[1] is None:
+                    self.labeled_count += 1
                     entry[1] = np.log2(embed_id - cache_hit_embed_id)
         self.index_train.add_with_ids(embeds, np.array(embeds_ids))
     
@@ -243,7 +251,7 @@ class RelaxedLearnedOPT(Cache):
         self.get_features(embeds_ids, embeds)
         self.record_for_training(embeds_ids, embeds)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
-        if self.index_train.ntotal >= self.train_capacity:
+        if self.labeled_count >= self.train_capacity:
             self.train_reg()
         evicted_items = []
         rejected_items = []
