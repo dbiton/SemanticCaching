@@ -5,12 +5,13 @@ import faiss
 import tqdm
 
 from OPT import RelaxedLearnedOPT
+from reduce_dim import reduce_dim
 
 def load_embeds():
     filenames = {
         "Bing": "embeds_bing.pkl",
-        "StackOverflow": "embeds_so.pkl",
-        "WildChat": "embeds_chat.pkl"
+        #"StackOverflow": "embeds_so.pkl",
+        #"WildChat": "embeds_chat.pkl"
     }
     embeds_dir = "datasets"
     for dataset_name, filename in filenames.items():
@@ -66,13 +67,14 @@ if __name__ == "__main__":
     DELTAS_COUNT = 8
     STREAM_SIZE = 10000
     CACHE_SIZE = 1000
-    BATCH_SIZE = 8
+    BATCH_SIZE = 16
     COUNT_NN = 1
     SAME_EMBED_DISTANCE = 1.0
     BELADY_BOUNDARY_COE = 2.0
-    cache = RelaxedLearnedOPT(SAME_EMBED_DISTANCE, DELTAS_COUNT, 1, BELADY_BOUNDARY_COE)    
+    cache = RelaxedLearnedOPT(SAME_EMBED_DISTANCE, DELTAS_COUNT, 1, BELADY_BOUNDARY_COE, DIM)    
     for dataset_name, embeds in load_embeds():
         embeds = embeds[:STREAM_SIZE]
+        embeds = reduce_dim(embeds, DIM)
         pbar = tqdm.tqdm(total=len(embeds), desc=f"Processing {dataset_name}...")
         embeds_covers = create_embeds_covers(embeds, SAME_EMBED_DISTANCE)
         index = faiss.IndexIDMap2(faiss.IndexFlatL2(DIM))
@@ -80,11 +82,12 @@ if __name__ == "__main__":
         count_evicts = 0
         count_good_evicts = 0
         for batch_embeds, i_embeds in yield_batches(embeds, BATCH_SIZE):
+            next_i_embed = i_embeds[-1]
             iter_cache_hits, evicted_embeds_ids = cache.request(batch_embeds, i_embeds, COUNT_NN)
             if len(evicted_embeds_ids) > 0:
                 count_evicts += len(evicted_embeds_ids)
-                next_hits = get_next_hits(embeds_covers, i_embeds[-1], evicted_embeds_ids)
-                count_good_evicts += len(np.where(next_hits > BELADY_BOUNDARY_COE * CACHE_SIZE)[0])
+                next_hits = get_next_hits(embeds_covers, next_i_embed, evicted_embeds_ids)
+                count_good_evicts += len(np.where(next_hits > next_i_embed + BELADY_BOUNDARY_COE * CACHE_SIZE)[0])
             pbar.update(len(batch_embeds))
         print("GDR:", count_good_evicts / count_evicts)
                 

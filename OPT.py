@@ -180,6 +180,7 @@ class RelaxedLearnedOPT(Cache):
         super().initialize(capacity, index)
     
     def train_reg(self):
+        print("training!")
         self.reg = XGBRegressor(objective='reg:squarederror', verbosity="2", random_state=42)
         data = pd.DataFrame(self.training_data.values())
         X = np.array(data['features'].tolist())
@@ -198,7 +199,7 @@ class RelaxedLearnedOPT(Cache):
             hits = pad_array(indices[start:end], self.deltas_count, -1)
             relative_hits = np.where(hits != -1, embed_id - hits, hits)
             dists = pad_array(distances[start:end], self.deltas_count, -1)
-            result[embed_id] = {"features": np.hstack((relative_hits, dists))}
+            result[embed_id] = {"features": np.hstack((relative_hits, dists))} 
             if with_labels:
                 result[embed_id]["label"] = np.log(self.train_capacity * 2)
                 for i in indices[start:end]:
@@ -222,14 +223,13 @@ class RelaxedLearnedOPT(Cache):
             X = np.array(data['features'].tolist())
             y = self.reg.predict(X)
             cands = np.where(y < np.log(self.get_belady_boundary()))
-            if y.std() > 0:
-                x = 3
             if len(cands) > 0:
-                evicted_eid = embeds_ids[np.random.choice(cands[0])]
+                evicted_eids = list(embeds_ids[cands])
             else:
-                evicted_eid = embeds_ids[np.random.choice(embeds_ids)]
-            self.items.pop(evicted_eid)
-            return evicted_eid
+                evicted_eids = [embeds_ids[np.random.choice(embeds_ids)]]
+            for eid in evicted_eids:
+                self.items.pop(eid)
+            return evicted_eids
         else:
             return self.items.popitem(last=False)[0]
             
@@ -238,15 +238,15 @@ class RelaxedLearnedOPT(Cache):
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         self.record_for_training(embeds_ids, embeds)
-        if len(self.training_data) == self.train_capacity:
+        if len(self.training_data) >= self.train_capacity:
             self.train_reg()
         evicted_items = []
         rejected_items = []
         additions = []
         for embed, embed_id in zip(embeds, embeds_ids):
             if self.capacity <= self.size():
-                evicted_eid = self.evict()
-                evicted_items.append(evicted_eid)
+                evicted_eids = self.evict()
+                evicted_items += evicted_eids
             self.items[embed_id] = embed
             additions.append((embed_id, embed))
             self.curr_embed_id += 1
