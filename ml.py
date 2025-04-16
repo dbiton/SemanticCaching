@@ -62,12 +62,13 @@ def yield_batches(lst, k):
     for i in range(0, len(lst), k):
         yield lst[i:i + k], list(range(i, min(i+k, len(lst))))
 
+# GDR: 0.17
 if __name__ == "__main__":
     DIM = 384
     DELTAS_COUNT = 8
-    STREAM_SIZE = 90000
-    CACHE_SIZE = 9000
-    BATCH_SIZE = 16
+    STREAM_SIZE = 10000
+    CACHE_SIZE = 1000
+    BATCH_SIZE = 10
     COUNT_NN = 1
     SAME_EMBED_DISTANCE = 1.0
     BELADY_BOUNDARY_COE = 2.0

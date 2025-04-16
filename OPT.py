@@ -195,6 +195,17 @@ class RelaxedLearnedOPT(Cache):
         self.training_data = {k: v for (k, v) in self.training_data.items() if k not in removed_embeds_ids}
         self.index_train.remove_ids(np.array(removed_embeds_ids))
         self.labeled_count = 0
+
+    @staticmethod
+    def calc_edc(deltas, edc_count):
+        edcs = np.zeros(edc_count)
+        for delta in deltas:
+            for edc_index in range(edc_count):
+                decay_const = pow(2, 9 + edc_index + 1)
+                decay_factor = pow(2, - delta / decay_const)
+                edcs[edc_index] = 1 + edcs[edc_index] * decay_factor
+        return edcs
+                
     
     def get_features(self, embeds_ids, embeds):
         dists, ids = self.index_train.search(embeds, self.deltas_count)
@@ -207,8 +218,8 @@ class RelaxedLearnedOPT(Cache):
             cache_hits_indice = np.where(embed_dists <= self.same_embed_distance)
             cache_hits_embeds_ids = ids[i][cache_hits_indice]
             deltas = pad_array(np.diff(np.sort(cache_hits_embeds_ids)), self.deltas_count, -1)
-            edc = []
-            features[embed_id] = np.hstack((embed_relative_hits, embed_dists, deltas))
+            edc = self.calc_edc(deltas, self.deltas_count)
+            features[embed_id] = np.hstack((embed_relative_hits, embed_dists, deltas, edc))
             cache_hits[embed_id] = cache_hits_embeds_ids
         return features, cache_hits
     
