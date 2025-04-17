@@ -182,7 +182,13 @@ class RelaxedLearnedOPT(Cache):
     
     def train_reg(self):
         print("training!")
-        self.reg = XGBRegressor(objective='reg:squarederror', verbosity="2", random_state=42)
+        self.reg = XGBRegressor(
+            objective='reg:squarederror',
+            verbosity=2,
+            random_state=42,
+            max_depth=8,
+            n_estimators=16
+        )
         data = pd.DataFrame(self.training_data.values())
         X = np.array(data[0].tolist())
         default_label = np.log2(2 * self.train_capacity)
@@ -205,23 +211,39 @@ class RelaxedLearnedOPT(Cache):
                 decay_factor = pow(2, - delta / decay_const)
                 edcs[edc_index] = 1 + edcs[edc_index] * decay_factor
         return edcs
-                
     
     def get_features(self, embeds_ids, embeds):
         dists, ids = self.index_train.search(embeds, self.deltas_count)
         dists = np.sqrt(dists)
         features = {}
         cache_hits = {}
+
         for i, embed_id in enumerate(embeds_ids):
             embed_relative_hits = np.where(ids[i] != -1, ids[i] - embed_id, -1)
             embed_dists = dists[i]
+            average_distance = np.mean(embed_dists)
+            inverse_average_distance = 1 / average_distance
+
             cache_hits_indice = np.where(embed_dists <= self.same_embed_distance)
             cache_hits_embeds_ids = ids[i][cache_hits_indice]
+
             deltas = pad_array(np.diff(np.sort(cache_hits_embeds_ids)), self.deltas_count, -1)
             edc = self.calc_edc(deltas, self.deltas_count)
-            features[embed_id] = np.hstack((embed_relative_hits, embed_dists, deltas, edc))
+            count_cache_hits = len(cache_hits_indice)
+
+            features[embed_id] = np.hstack((
+                embed_relative_hits, 
+                average_distance, 
+                embed_dists, 
+                deltas, 
+                edc, 
+                count_cache_hits, 
+                inverse_average_distance
+            ))
             cache_hits[embed_id] = cache_hits_embeds_ids
+
         return features, cache_hits
+
     
     def record_for_training(self, embeds_ids, embeds):
         features, cache_hits = self.get_features(embeds_ids, embeds)
