@@ -187,7 +187,7 @@ class RelaxedLearnedOPT(Cache):
             verbosity=2,
             random_state=42,
             max_depth=8,
-            n_estimators=16
+            n_estimators=64
         )
         data = pd.DataFrame(self.training_data.values())
         X = np.array(data[0].tolist())
@@ -268,10 +268,7 @@ class RelaxedLearnedOPT(Cache):
             X = np.array(list(features.values()))
             y = self.reg.predict(X)
             cands = np.where(y < np.log(self.get_belady_boundary()))
-            if len(cands) > 0:
-                evicted_eids = embeds_ids[cands]
-            else:
-                evicted_eids = np.random.choice(embeds_ids, size=batch_size, replace=False)
+            evicted_eids = embeds_ids[cands]
             for eid in evicted_eids:
                 self.items.pop(eid)
             return list(evicted_eids)
@@ -293,9 +290,10 @@ class RelaxedLearnedOPT(Cache):
             if self.capacity <= self.size():
                 evicted_eids = self.evict()
                 evicted_items += evicted_eids
-            self.items[embed_id] = embed
-            additions.append((embed_id, embed))
-            self.curr_embed_id += 1
+            if self.capacity >= self.size():
+                self.items[embed_id] = embed
+                additions.append((embed_id, embed))
+                self.curr_embed_id += 1
         # boilerplate
         if additions:
             additions_embeds = [v for (_, v) in additions]
