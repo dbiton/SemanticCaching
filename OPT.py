@@ -267,7 +267,7 @@ class RelaxedLearnedOPT(Cache):
             features, _ = self.get_features(embeds_ids, embeds)
             X = np.array(list(features.values()))
             y = self.reg.predict(X)
-            cands = np.where(y < np.log(self.get_belady_boundary()))
+            cands = np.where(y > np.log2(self.get_belady_boundary()))
             evicted_eids = embeds_ids[cands]
             for eid in evicted_eids:
                 self.items.pop(eid)
