@@ -176,6 +176,9 @@ class RLB_Reg():
     def get_belady_boundary(self):
         return self.train_capacity * self.belady_boundary_coe
     
+    def get_default_label(self):
+        return np.log2(self.get_belady_boundary() * 2)
+    
     def train(self):
         print("Training...")
         self.reg = XGBRegressor(
@@ -187,7 +190,7 @@ class RLB_Reg():
         )
         data = pd.DataFrame(self.training_data.values())
         X = np.array(data[0].tolist())
-        default_label = np.log2(self.get_belady_boundary() * 2)
+        default_label = self.get_default_label()
         y = data[1].fillna(default_label).to_list()
         self.reg.fit(X, y)
         self.remove_labeled_from_training()
@@ -221,7 +224,9 @@ class RLB_Reg():
                     entry[1] = np.log2(embed_id - cache_hit_embed_id)
         self.index_train.add_with_ids(embeds, np.array(embeds_ids))
     
-    def predict(self, X):
+    def predict(self, embeds_ids, embeds):
+        features, _ = self.get_features(embeds_ids, embeds)
+        X = np.array(list(features.values()))
         return self.reg.predict(X)
     
     def get_features(self, embeds_ids, embeds):
@@ -284,9 +289,7 @@ class RelaxedLearnedOPT(Cache):
             else:
                 indice = list(range(len(self.items)))
             embeds_ids, embeds = np.array(list(self.items.keys()))[indice], np.array(list(self.items.values()))[indice]
-            features, _ = self.reg.get_features(embeds_ids, embeds)
-            X = np.array(list(features.values()))
-            y = self.reg.predict(X)
+            y = self.reg.predict(embeds_ids, embeds)
             cands = np.where(y > np.log2(self.reg.get_belady_boundary()))
             if len(cands) == 0:
                 cands = [np.argmax(y)]

@@ -4,7 +4,8 @@ import numpy as np
 import faiss
 import tqdm
 
-from OPT import RelaxedLearnedOPT
+from OPT import RLB_Reg, RelaxedLearnedOPT
+from cache import LRU
 from reduce_dim import reduce_dim
 
 def load_embeds():
@@ -62,13 +63,39 @@ def yield_batches(lst, k):
     for i in range(0, len(lst), k):
         yield lst[i:i + k], list(range(i, min(i+k, len(lst))))
 
-# GDR: 0.17
-if __name__ == "__main__":
+
+def test_regressor():
     DIM = 384
-    DELTAS_COUNT = 8
+    DELTAS_COUNT = 4
     STREAM_SIZE = 10000
     CACHE_SIZE = 1000
-    BATCH_SIZE = 10
+    SAME_EMBED_DISTANCE = 1.0
+    BELADY_BOUNDARY_COE = 2.0
+    BATCH_SIZE = 16
+    reg = RLB_Reg(CACHE_SIZE, DELTAS_COUNT, SAME_EMBED_DISTANCE, BELADY_BOUNDARY_COE, DIM)
+    for dataset_name, embeds in load_embeds():
+        embeds = embeds[:STREAM_SIZE]
+        embeds_covers = create_embeds_covers(embeds, SAME_EMBED_DISTANCE)
+        for batch_embeds, i_embeds in yield_batches(embeds, BATCH_SIZE):
+            print(i_embeds[-1])
+            if reg.is_trained():
+                predict = reg.predict(i_embeds, batch_embeds)
+                actual = get_next_hits(embeds_covers, i_embeds[0], i_embeds)
+                actual[np.isposinf(actual)] = reg.get_default_label()
+                actual = np.log2(actual)
+                print(abs(predict-actual).mean())
+            reg.record_for_training(i_embeds, batch_embeds)
+                
+# GDR: 0.17
+if __name__ == "__main__":
+    test_regressor()
+
+def test_policy():
+    DIM = 384
+    DELTAS_COUNT = 4
+    STREAM_SIZE = 50000
+    CACHE_SIZE = 5000
+    BATCH_SIZE = 1
     COUNT_NN = 1
     SAME_EMBED_DISTANCE = 1.0
     BELADY_BOUNDARY_COE = 2.0
@@ -90,5 +117,6 @@ if __name__ == "__main__":
                 next_hits = get_next_hits(embeds_covers, next_i_embed, evicted_embeds_ids)
                 count_good_evicts += len(np.where(next_hits > next_i_embed + BELADY_BOUNDARY_COE * CACHE_SIZE)[0])
             pbar.update(len(batch_embeds))
-        print("GDR:", count_good_evicts / count_evicts)
+            if next_i_embed % 1000 == 0 and count_evicts > 0:
+                print("GDR:", count_good_evicts / count_evicts, count_good_evicts, count_evicts)
                 
