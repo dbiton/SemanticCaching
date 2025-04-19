@@ -172,7 +172,6 @@ class RLB_Reg():
     def is_trained(self):
         return self.reg is not None
     
-    
     def get_belady_boundary(self):
         return self.train_capacity * self.belady_boundary_coe
     
@@ -236,7 +235,7 @@ class RLB_Reg():
         cache_hits = {}
 
         for i, embed_id in enumerate(embeds_ids):
-            embed_relative_hits = np.where(ids[i] != -1, ids[i] - embed_id, -1)
+            embed_relative_hits = np.where(ids[i] != -1, np.log2(ids[i] - embed_id), -1)
             embed_dists = dists[i]
             average_distance = np.mean(embed_dists)
             inverse_average_distance = 1 / average_distance
@@ -251,11 +250,11 @@ class RLB_Reg():
             features[embed_id] = np.hstack((
                 embed_relative_hits, 
                 average_distance, 
-                embed_dists, 
+                #embed_dists, 
                 deltas, 
                 edc, 
                 count_cache_hits, 
-                inverse_average_distance
+                #inverse_average_distance
             ))
             cache_hits[embed_id] = cache_hits_embeds_ids
 
