@@ -2,17 +2,44 @@ import os
 import pickle
 import numpy as np
 import faiss
+from sklearn.decomposition import PCA
 import tqdm
 
 from OPT import RLB_Reg, RelaxedLearnedOPT
 from cache import LRU
 from reduce_dim import reduce_dim
 
+def reduce_dimension(name, X):
+    pca = PCA(n_components=16, svd_solver='randomized')
+    X_reduced = pca.fit_transform(X)
+    with open(f"{name}_reduced.pkl", "wb") as f:
+        pickle.dump(X_reduced, f)
+
+def save_embeds():
+    SAME_EMBED_DISTANCE = .75
+    for dataset_name, embeds in load_embeds():
+        print(dataset_name)
+        for size_exp in range(3, 10):
+            size = 10 ** size_exp
+            print(size)
+            embeds_subset = embeds[:size]
+            embeds_covers = create_embeds_covers(embeds_subset, SAME_EMBED_DISTANCE)
+            file_name = f"{size}_{dataset_name}.json"
+            with open(file_name, "wb") as f:
+                pickle.dump(embeds_covers, f)
+            if len(embeds) <= size:
+                break
+
+def load_embeds_covers():
+    with open("1000000_StackOverflow.json", "rb") as f:
+        return pickle.load(f)
+
 def load_embeds():
     filenames = {
+        "StackOverflow": "embeds_so.pkl",
+        "Steam": "embeds_steam.pkl",
         "Bing": "embeds_bing.pkl",
-        #"StackOverflow": "embeds_so.pkl",
-        #"WildChat": "embeds_chat.pkl"
+        "WildChat": "embeds_chat.pkl"
     }
     embeds_dir = "datasets"
     for dataset_name, filename in filenames.items():
@@ -49,14 +76,16 @@ def get_prev_hits(embeds_covers, curr_embed_id, embeds_ids):
 def create_embeds_covers(embeds, same_embed_distance):
     embeds = np.asarray(embeds, dtype=np.float32)
     n, d = embeds.shape
-    index = faiss.IndexFlatL2(d)
+    cpu_index = faiss.IndexFlatL2(d)
+    if faiss.get_num_gpus() > 0:
+        gpu_res = faiss.StandardGpuResources()
+        index = faiss.index_cpu_to_gpu(gpu_res, 0, cpu_index)
+    else:
+        index = cpu_index
     index.add(embeds)
     threshold = same_embed_distance ** 2
     lims, _, indices = index.range_search(embeds, threshold)
-    embeds_covers = []
-    for i in range(n):
-        i_covers = np.sort(np.array([j for j in indices[lims[i]:lims[i+1]] if j > i]))
-        embeds_covers.append(i_covers)
+    embeds_covers = [np.sort(indices[lims[i]:lims[i+1]][indices[lims[i]:lims[i+1]] > i]) for i in range(n)]
     return np.array(embeds_covers, dtype=object)
 
 def yield_batches(lst, k):
@@ -65,18 +94,20 @@ def yield_batches(lst, k):
 
 
 def test_regressor():
-    DIM = 384
+    DIM = 32
     DELTAS_COUNT = 8
-    STREAM_SIZE = 90000
-    CACHE_SIZE = 10000
-    SAME_EMBED_DISTANCE = 0.75
+    STREAM_SIZE = 1000000
+    CACHE_SIZE = 128000//4
     BELADY_BOUNDARY_COE = 2.0
+    SAME_EMBED_DISTANCE = 0.5
     BATCH_SIZE = 16
-    mean_vals = []
-    reg = RLB_Reg(CACHE_SIZE, DELTAS_COUNT, SAME_EMBED_DISTANCE, BELADY_BOUNDARY_COE, DIM)
     for dataset_name, embeds in load_embeds():
+        reg = RLB_Reg(CACHE_SIZE, DELTAS_COUNT, SAME_EMBED_DISTANCE, BELADY_BOUNDARY_COE, DIM)
+        embeds = reduce_dim(embeds, DIM, STREAM_SIZE)
+        gdrs = []
+        print(dataset_name)
         embeds = embeds[:STREAM_SIZE]
-        embeds_covers = create_embeds_covers(embeds, SAME_EMBED_DISTANCE)
+        embeds_covers = load_embeds_covers()
         for batch_embeds, i_embeds in yield_batches(embeds, BATCH_SIZE):
             print(i_embeds[-1])
             if reg.is_trained():
@@ -84,15 +115,21 @@ def test_regressor():
                 predict = 2**predict
                 actual = get_next_hits(embeds_covers, i_embeds[0], i_embeds) - i_embeds
                 actual[np.isposinf(actual)] = reg.get_default_label()
-                mean_vals.append(abs(predict-actual).mean())
-                print(np.array(mean_vals).mean())
+                predict_evict = np.where(predict >= BELADY_BOUNDARY_COE * CACHE_SIZE)[0]
+                actual_evict = np.where(actual >= BELADY_BOUNDARY_COE * CACHE_SIZE)[0]
+                count_good_evicts = len(set(predict_evict).intersection(set(actual_evict)))
+                count_evicts = len(predict_evict)
+                if count_evicts > 0:
+                    gdr = count_good_evicts / count_evicts
+                    gdrs.append(gdr)
+                print(np.mean(gdrs))
             reg.record_for_training(i_embeds, batch_embeds)
             
 
 def test_policy():
     DIM = 384
     DELTAS_COUNT = 4
-    STREAM_SIZE = 100000
+    STREAM_SIZE = 1000000
     CACHE_SIZE = 10000
     BATCH_SIZE = 1
     COUNT_NN = 1
@@ -101,9 +138,9 @@ def test_policy():
     cache = RelaxedLearnedOPT(SAME_EMBED_DISTANCE, DELTAS_COUNT, 1, BELADY_BOUNDARY_COE, DIM)    
     for dataset_name, embeds in load_embeds():
         embeds = embeds[:STREAM_SIZE]
-        embeds = reduce_dim(embeds, DIM)
+        # embeds = reduce_dim(embeds, DIM)
         pbar = tqdm.tqdm(total=len(embeds), desc=f"Processing {dataset_name}...")
-        embeds_covers = create_embeds_covers(embeds, SAME_EMBED_DISTANCE)
+        embeds_covers = load_embeds_covers()
         index = faiss.IndexIDMap2(faiss.IndexFlatL2(DIM))
         cache.initialize(CACHE_SIZE, index)
         count_evicts = 0
@@ -121,6 +158,6 @@ def test_policy():
                 
 # GDR: 0.17
 if __name__ == "__main__":
-    test_policy()
+    test_regressor()
 
                 

@@ -184,8 +184,8 @@ class RLB_Reg():
             objective='reg:squarederror',
             verbosity=2,
             random_state=42,
-            max_depth=8,
-            n_estimators=64
+            max_depth=6,
+            n_estimators=128
         )
         data = pd.DataFrame(self.training_data.values())
         X = np.array(data[0].tolist())
@@ -235,11 +235,11 @@ class RLB_Reg():
         cache_hits = {}
 
         for i, embed_id in enumerate(embeds_ids):
-            embed_relative_hits = np.where(ids[i] != -1, np.log2(ids[i] - embed_id), -1)
+            embed_relative_hits = np.where(ids[i] != -1, ids[i] - embed_id, -1)
             embed_dists = dists[i]
-            average_distance = np.mean(embed_dists)
-            inverse_average_distance = 1 / average_distance
-
+            distances = [v for v in embed_dists if v <= 1e10]
+            hits_distances = [v for v in embed_dists if v <= self.same_embed_distance]
+            
             cache_hits_indice = np.where(embed_dists <= self.same_embed_distance)
             cache_hits_embeds_ids = ids[i][cache_hits_indice]
 
@@ -247,15 +247,17 @@ class RLB_Reg():
             edc = self.calc_edc(deltas, self.deltas_count)
             count_cache_hits = len(cache_hits_indice)
 
-            features[embed_id] = np.hstack((
+            curr_features = np.hstack((
                 embed_relative_hits, 
-                average_distance, 
-                #embed_dists, 
+                np.mean(distances),
+                np.std(distances),
+                np.mean(hits_distances),
+                np.std(hits_distances),
                 deltas, 
                 edc, 
                 count_cache_hits, 
-                #inverse_average_distance
             ))
+            features[embed_id] = np.nan_to_num(curr_features, nan=0)
             cache_hits[embed_id] = cache_hits_embeds_ids
 
         return features, cache_hits
@@ -282,7 +284,7 @@ class RelaxedLearnedOPT(Cache):
     
     def evict(self):
         if self.reg.is_trained():
-            batch_size = 4
+            batch_size = 32
             if len(self.items) > batch_size:
                 indice = random.sample(range(len(self.items)), batch_size)
             else:
