@@ -3,7 +3,7 @@ import pandas as pd
 from cache import Cache
 import numpy as np
 import faiss
-from xgboost.sklearn import XGBRegressor
+import lightgbm as lgb
 import random
 
 class OPT(Cache):
@@ -180,17 +180,11 @@ class RLB_Reg():
     
     def train(self):
         print("Training...")
-        self.reg = XGBRegressor(
-            objective='reg:squarederror',
-            verbosity=2,
-            random_state=42,
-            max_depth=6,
-            n_estimators=128
-        )
+        self.reg = lgb.LGBMRegressor()
         data = pd.DataFrame(self.training_data.values())
-        X = np.array(data[0].tolist())
+        X = np.array(data[0].tolist()).astype(np.float32)
         default_label = self.get_default_label()
-        y = data[1].fillna(default_label).to_list()
+        y = data[1].fillna(default_label).astype(np.float32).to_list()
         self.reg.fit(X, y)
         self.remove_labeled_from_training()
     
@@ -203,7 +197,10 @@ class RLB_Reg():
     @staticmethod
     def calc_edc(deltas, edc_count):
         edcs = np.zeros(edc_count)
-        for delta in deltas:
+        for i_delta, delta in enumerate(deltas):
+            if delta == -1:
+                edcs[i_delta:] = -1
+                break
             for edc_index in range(edc_count):
                 decay_const = pow(2, 9 + edc_index + 1)
                 decay_factor = pow(2, - delta / decay_const)
@@ -231,34 +228,45 @@ class RLB_Reg():
     def get_features(self, embeds_ids, embeds):
         dists, ids = self.index_train.search(embeds, self.deltas_count)
         dists = np.sqrt(dists)
+        
         features = {}
         cache_hits = {}
 
         for i, embed_id in enumerate(embeds_ids):
-            embed_relative_hits = np.where(ids[i] != -1, ids[i] - embed_id, -1)
             embed_dists = dists[i]
-            distances = [v for v in embed_dists if v <= 1e10]
-            hits_distances = [v for v in embed_dists if v <= self.same_embed_distance]
-            
-            cache_hits_indice = np.where(embed_dists <= self.same_embed_distance)
-            cache_hits_embeds_ids = ids[i][cache_hits_indice]
+            embed_ids = ids[i]
 
-            deltas = pad_array(np.diff(np.sort(cache_hits_embeds_ids)), self.deltas_count, -1)
+            valid_mask = embed_ids != -1
+            valid_ids = embed_ids[valid_mask]
+            valid_dists = embed_dists[valid_mask]
+
+            hits_mask = valid_dists <= self.same_embed_distance
+            hits_ids = valid_ids[hits_mask]
+            hits_dists = valid_dists[hits_mask]
+
+            reasonable_mask = valid_dists <= 1e10
+            reasonable_dists = valid_dists[reasonable_mask]
+
+            if hits_ids.size > 0:
+                sorted_hits = np.sort(hits_ids)
+                deltas = np.diff(sorted_hits)
+            else:
+                deltas = np.array([], dtype=int)
+            deltas = pad_array(deltas, self.deltas_count, -1)
             edc = self.calc_edc(deltas, self.deltas_count)
-            count_cache_hits = len(cache_hits_indice)
 
             curr_features = np.hstack((
-                embed_relative_hits, 
-                np.mean(distances),
-                np.std(distances),
-                np.mean(hits_distances),
-                np.std(hits_distances),
-                deltas, 
-                edc, 
-                count_cache_hits, 
+                np.mean(reasonable_dists) if reasonable_dists.size else -1,
+                np.std(reasonable_dists) if reasonable_dists.size else -1,
+                np.mean(hits_dists) if hits_dists.size else -1,
+                np.std(hits_dists) if hits_dists.size else -1,
+                deltas,
+                edc,
+                hits_ids.size,
             ))
-            features[embed_id] = np.nan_to_num(curr_features, nan=0)
-            cache_hits[embed_id] = cache_hits_embeds_ids
+
+            features[embed_id] = np.nan_to_num(curr_features, nan=-1)
+            cache_hits[embed_id] = hits_ids
 
         return features, cache_hits
     
@@ -304,20 +312,20 @@ class RelaxedLearnedOPT(Cache):
     
     def request(self, embeds, embeds_ids, count_nn=1):
         closest_dists, closest_embeds_ids = self.get_closest_stored_embeds(embeds, count_nn)
-        self.reg.get_features(embeds_ids, embeds)
         self.reg.record_for_training(embeds_ids, embeds)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
         rejected_items = []
         additions = []
-        for embed, embed_id in zip(embeds, embeds_ids):
+        for embed, embed_id in zip(embeds, embeds_ids):            
             if self.capacity <= self.size():
-                evicted_eids = self.evict()
-                evicted_items += evicted_eids
+                evicted_items += self.evict()
             if self.capacity >= self.size():
                 self.items[embed_id] = embed
                 additions.append((embed_id, embed))
-                self.curr_embed_id += 1
+            else:
+                evicted_items.append(embed_id)
+            self.curr_embed_id += 1
         # boilerplate
         if additions:
             additions_embeds = [v for (_, v) in additions]
