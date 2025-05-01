@@ -1,3 +1,4 @@
+import bisect
 from collections import OrderedDict
 import pandas as pd
 from cache import Cache
@@ -168,6 +169,7 @@ class RLB_Reg():
         self.same_embed_distance = same_embed_distance
         self.labeled_count = 0
         self.belady_boundary_coe = belady_boundary_coe
+        self.dim = dim
     
     def is_trained(self):
         return self.reg is not None
@@ -280,7 +282,8 @@ class RelaxedLearnedOPT(Cache):
         self.train_capacity_ratio = train_capacity_ratio 
 
     def initialize(self, capacity: int, index):
-        self.items = OrderedDict()
+        self.first_fit = False
+        self.items = []
         self.labeled_count = 0
         self.belady_boundary = np.inf
         self.curr_embed_id = 0
@@ -290,43 +293,43 @@ class RelaxedLearnedOPT(Cache):
         self.index_train = faiss.IndexIDMap2(faiss.IndexFlatL2(self.dim))
         super().initialize(capacity, index)    
     
-    def evict(self):
-        if self.reg.is_trained():
-            batch_size = 32
-            if len(self.items) > batch_size:
-                indice = random.sample(range(len(self.items)), batch_size)
-            else:
-                indice = list(range(len(self.items)))
-            embeds_ids, embeds = np.array(list(self.items.keys()))[indice], np.array(list(self.items.values()))[indice]
-            y = self.reg.predict(embeds_ids, embeds)
-            cands = np.where(y > np.log2(self.reg.get_belady_boundary()))
-            if len(cands) == 0:
-                cands = [np.argmax(y)]
-            evicted_eids = embeds_ids[cands]
-            for eid in evicted_eids:
-                self.items.pop(eid)
-            return list(evicted_eids)
-        else:
-            return [self.items.popitem(last=False)[0]]
-            
+    def predict(self, embeds_ids, embeds):
+        y = self.reg.predict(np.array(embeds_ids), np.array(embeds))
+        return 2 ** y + embeds_ids
     
     def request(self, embeds, embeds_ids, count_nn=1):
-        closest_dists, closest_embeds_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         self.reg.record_for_training(embeds_ids, embeds)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
         rejected_items = []
         additions = []
-        for embed, embed_id in zip(embeds, embeds_ids):            
+        
+        if self.reg.is_trained():
+            if not self.first_fit:
+                self.first_fit = True
+                _, all_embeds_ids, all_embeds = zip(*self.items)
+                all_next_hits = self.predict(all_embeds_ids, all_embeds)
+                self.items = sorted(list(zip(all_next_hits, all_embeds_ids, all_embeds)))
+            next_hits = self.predict(embeds_ids, embeds)
+            entries = sorted(list(zip(next_hits, embeds_ids, embeds)))
+        else:
+            entries = list(zip(list([-1] * len(embeds)), embeds_ids, embeds))
+        
+        for next_hit, embed_id, embed in entries:            
             if self.capacity <= self.size():
-                evicted_items += self.evict()
+                # remove worst
+                max_hit, max_embed_id, max_embed = self.items[-1]
+                if max_hit >= next_hit:
+                    self.items.pop()
+                    evicted_items.append(max_embed_id)
+                else:
+                    evicted_items.append(embed_id)
             if self.capacity >= self.size():
-                self.items[embed_id] = embed
+                bisect.insort(self.items, (next_hit, embed_id, embed))
                 additions.append((embed_id, embed))
-            else:
-                evicted_items.append(embed_id)
             self.curr_embed_id += 1
-        # boilerplate
+
         if additions:
             additions_embeds = [v for (_, v) in additions]
             additions_ids = [v for (v, _) in additions]

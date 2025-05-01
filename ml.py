@@ -6,7 +6,6 @@ from sklearn.decomposition import PCA
 import tqdm
 
 from OPT import RLB_Reg, RelaxedLearnedOPT
-from cache import LRU
 from reduce_dim import reduce_dim
 
 def reduce_dimension(name, X):
@@ -94,12 +93,12 @@ def yield_batches(lst, k):
 
 
 def test_regressor():
-    DIM = 32
+    DIM = 100
     DELTAS_COUNT = 8
-    STREAM_SIZE = 1000000
-    CACHE_SIZE = 128000//4
+    STREAM_SIZE = 200000
+    CACHE_SIZE = 64000
     BELADY_BOUNDARY_COE = 2.0
-    SAME_EMBED_DISTANCE = 0.5
+    SAME_EMBED_DISTANCE = .75
     BATCH_SIZE = 16
     for dataset_name, embeds in load_embeds():
         reg = RLB_Reg(CACHE_SIZE, DELTAS_COUNT, SAME_EMBED_DISTANCE, BELADY_BOUNDARY_COE, DIM)
@@ -107,40 +106,35 @@ def test_regressor():
         gdrs = []
         print(dataset_name)
         embeds = embeds[:STREAM_SIZE]
-        embeds_covers = load_embeds_covers()
+        embeds_covers = create_embeds_covers(embeds, SAME_EMBED_DISTANCE)
         for batch_embeds, i_embeds in yield_batches(embeds, BATCH_SIZE):
             print(i_embeds[-1])
             if reg.is_trained():
                 predict = reg.predict(i_embeds, batch_embeds)
                 predict = 2**predict
                 actual = get_next_hits(embeds_covers, i_embeds[0], i_embeds) - i_embeds
-                actual[np.isposinf(actual)] = reg.get_default_label()
-                predict_evict = np.where(predict >= BELADY_BOUNDARY_COE * CACHE_SIZE)[0]
-                actual_evict = np.where(actual >= BELADY_BOUNDARY_COE * CACHE_SIZE)[0]
-                count_good_evicts = len(set(predict_evict).intersection(set(actual_evict)))
-                count_evicts = len(predict_evict)
-                if count_evicts > 0:
-                    gdr = count_good_evicts / count_evicts
-                    gdrs.append(gdr)
+                actual[np.isposinf(actual)] = 2 ** reg.get_default_label()
+                gdrs.append(abs(actual-predict).mean())
                 print(np.mean(gdrs))
             reg.record_for_training(i_embeds, batch_embeds)
             
 
 def test_policy():
     DIM = 384
-    DELTAS_COUNT = 4
-    STREAM_SIZE = 1000000
+    DELTAS_COUNT = 8
+    STREAM_SIZE = 100000
     CACHE_SIZE = 10000
-    BATCH_SIZE = 1
+    BATCH_SIZE = 10
     COUNT_NN = 1
-    SAME_EMBED_DISTANCE = 1.0
+    SAME_EMBED_DISTANCE = .85
     BELADY_BOUNDARY_COE = 2.0
+    # cache = LFU(SAME_EMBED_DISTANCE)    
     cache = RelaxedLearnedOPT(SAME_EMBED_DISTANCE, DELTAS_COUNT, 1, BELADY_BOUNDARY_COE, DIM)    
     for dataset_name, embeds in load_embeds():
         embeds = embeds[:STREAM_SIZE]
-        # embeds = reduce_dim(embeds, DIM)
+        embeds = reduce_dim(embeds, DIM)
         pbar = tqdm.tqdm(total=len(embeds), desc=f"Processing {dataset_name}...")
-        embeds_covers = load_embeds_covers()
+        embeds_covers = create_embeds_covers(embeds, SAME_EMBED_DISTANCE)
         index = faiss.IndexIDMap2(faiss.IndexFlatL2(DIM))
         cache.initialize(CACHE_SIZE, index)
         count_evicts = 0
@@ -150,14 +144,14 @@ def test_policy():
             iter_cache_hits, evicted_embeds_ids = cache.request(batch_embeds, i_embeds, COUNT_NN)
             if len(evicted_embeds_ids) > 0:
                 count_evicts += len(evicted_embeds_ids)
-                next_hits = get_next_hits(embeds_covers, next_i_embed, evicted_embeds_ids) - i_embeds
+                next_hits = get_next_hits(embeds_covers, next_i_embed, evicted_embeds_ids) - i_embeds[-1]
                 count_good_evicts += len(np.where(next_hits >= BELADY_BOUNDARY_COE * CACHE_SIZE)[0])
-            pbar.update(len(batch_embeds))
-            if next_i_embed % 1000 == 0 and count_evicts > 0:
                 print("GDR:", count_good_evicts / count_evicts, count_good_evicts, count_evicts)
+                print("LABELS", cache.reg.labeled_count)
+            pbar.update(len(batch_embeds))
                 
 # GDR: 0.17
 if __name__ == "__main__":
-    test_regressor()
+    test_policy()
 
                 
