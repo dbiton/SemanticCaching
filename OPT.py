@@ -314,7 +314,7 @@ class RelaxedLearnedOPT(Cache):
             next_hits = self.predict(embeds_ids, embeds)
             entries = sorted(list(zip(next_hits, embeds_ids, embeds)))
         else:
-            entries = list(zip(list([-1] * len(embeds)), embeds_ids, embeds))
+            entries = list(zip(-np.array(embeds_ids), embeds_ids, embeds))
         
         for next_hit, embed_id, embed in entries:            
             if self.capacity <= self.size():
