@@ -24,7 +24,7 @@ dataset_filenames = {
     "Steam": "datasets/embeds_steam.pkl",
 }
 has_gpu = False
-NUM_PROCS = 6
+NUM_PROCS = 1
 
 def plot(dataset_name, results):
     for prop_name, prop_results in results.items():
@@ -115,14 +115,15 @@ def process_layered(args):
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 2000
-    dim = 10
+    num_samples = 10000
+    MAX_CACHE_SIZE = 0.25
+    dim = 384
+    same_embed_distance = 0.75
     for dataset_name, embeds in load_embeds():
         embeds = reduce_dim(embeds, dim)
         print(f"loaded {dataset_name}...")
         embeds = embeds[:num_samples]
         print("loaded!")
-        same_embed_distance = 0.5
         similar_embed_distance = 1.0
         caches = {
             "RL_OPT": RelaxedLearnedOPT(same_embed_distance, dim=dim),
@@ -134,16 +135,15 @@ def main():
             #"PCA": PCA(same_embed_distance),
             #"Radius": FixedRadius(same_embed_distance, similar_embed_distance),
             #"Dummy": Dummy(same_embed_distance),
-            "RR": RR(same_embed_distance),
+            #"RR": RR(same_embed_distance),
             #"DistanceLFU": DistanceLFU(same_embed_distance),
             "LFU": LFU(same_embed_distance),
-            "DALFU": PeriodicAgingLFU(same_embed_distance, aging_interval=720, aging_factor=0.5),
+            #"DALFU": PeriodicAgingLFU(same_embed_distance, aging_interval=720, aging_factor=0.5),
         }
 
         results = {}
         args = []
         COUNT_STEPS = 10
-        MAX_CACHE_SIZE = 0.1
         for cache_name, cache in caches.items():
             step_size = int(num_samples * MAX_CACHE_SIZE // COUNT_STEPS)
             for cache_size in range(step_size, int(num_samples * MAX_CACHE_SIZE), step_size):
@@ -153,11 +153,13 @@ def main():
             pbar = tqdm.tqdm(total=2*len(args), desc=f"Processing {dataset_name} with {num_batches} batches")
             args = [(None, *arg) for arg in args]
             with ProcessPoolExecutor(NUM_PROCS) as executor:
-                raw_results = chain(executor.map(process_layered, args), executor.map(process, args))
+                # raw_results = chain(executor.map(process_layered, args), executor.map(process, args))
+                raw_results = executor.map(process, args)
         else:
             pbar = tqdm.tqdm(total=2*num_batches, desc=f"Processing {dataset_name} with {num_batches} batches")
             args = [(pbar, *arg) for arg in args]
-            raw_results = chain(map(process_layered, args), map(process, args))
+            # raw_results = chain(map(process_layered, args), map(process, args))
+            raw_results = map(process, args)
             
         for iter_results in raw_results:
             if NUM_PROCS > 1: 
