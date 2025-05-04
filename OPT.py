@@ -7,6 +7,8 @@ import faiss
 import lightgbm as lgb
 import random
 
+from freq_reg import FreqReg
+
 class OPT(Cache):
 
     def __init__(self, same_embed_distance, embeds):
@@ -49,7 +51,7 @@ class OPT(Cache):
         rejected_items = []
         additions = []
         
-        stale_items = [eid for (eid, next_hit) in self.items.items() if next_hit < self.curr_embed_id]
+        stale_items = [eid for (eid, next_hit) in self.items.items() if next_hit <= self.curr_embed_id]
         if len(stale_items) > 0:
             self.items.update(self.get_next_hits(stale_items))
         
@@ -282,7 +284,7 @@ class RelaxedLearnedOPT(Cache):
         self.train_capacity_ratio = train_capacity_ratio 
 
     def initialize(self, capacity: int, index):
-        self.first_fit = False
+        self.train_counter = 0
         self.items = []
         self.labeled_count = 0
         self.belady_boundary = np.inf
@@ -306,8 +308,8 @@ class RelaxedLearnedOPT(Cache):
         additions = []
         
         if self.reg.is_trained():
-            if not self.first_fit:
-                self.first_fit = True
+            if self.reg.get_train_counter() < self.train_counter:
+                self.train_counter += 1
                 _, all_embeds_ids, all_embeds = zip(*self.items)
                 all_next_hits = self.predict(all_embeds_ids, all_embeds)
                 self.items = sorted(list(zip(all_next_hits, all_embeds_ids, all_embeds)))
@@ -321,6 +323,70 @@ class RelaxedLearnedOPT(Cache):
                 # remove worst
                 max_hit, max_embed_id, max_embed = self.items[-1]
                 if max_hit >= next_hit:
+                    self.items.pop()
+                    evicted_items.append(max_embed_id)
+                else:
+                    evicted_items.append(embed_id)
+            if self.capacity >= self.size():
+                bisect.insort(self.items, (next_hit, embed_id, embed))
+                additions.append((embed_id, embed))
+            self.curr_embed_id += 1
+
+        if additions:
+            additions_embeds = [v for (_, v) in additions]
+            additions_ids = [v for (v, _) in additions]
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
+        return cache_hits, evicted_items + rejected_items
+
+class FreqOPT(Cache):
+    def __init__(self, same_embed_distance, deltas_count=4, train_capacity_ratio=1.0, belady_boundary_coe = 2.0, dim = 384):
+        super().__init__(same_embed_distance)
+        self.dim = dim
+        self.belady_boundary_coe = belady_boundary_coe
+        self.deltas_count = deltas_count
+        self.train_capacity_ratio = train_capacity_ratio 
+
+    def initialize(self, capacity: int, index):
+        self.train_counter = 0
+        self.items = []
+        self.labeled_count = 0
+        self.belady_boundary = np.inf
+        self.curr_embed_id = 0
+        train_capacity = int(self.train_capacity_ratio * capacity)
+        self.reg = FreqReg(train_capacity, train_capacity, self.deltas_count, self.same_embed_distance, self.dim)
+        self.training_data = {}
+        self.index_train = faiss.IndexIDMap2(faiss.IndexFlatL2(self.dim))
+        super().initialize(capacity, index)    
+    
+    def predict(self, embeds_ids, embeds):
+        return self.reg.predict(np.array(embeds_ids), np.array(embeds))
+    
+    def request(self, embeds, embeds_ids, count_nn=1):
+        closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
+        self.reg.record_for_training(embeds_ids, embeds)
+        cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
+        evicted_items = []
+        rejected_items = []
+        additions = []
+        
+        if self.reg.is_trained():
+            if self.reg.get_train_counter() < self.train_counter:
+                self.train_counter += 1
+                _, all_embeds_ids, all_embeds = zip(*self.items)
+                all_next_hits = self.predict(all_embeds_ids, all_embeds)
+                self.items = sorted(list(zip(all_next_hits, all_embeds_ids, all_embeds)))
+            next_hits = self.predict(embeds_ids, embeds)
+            entries = sorted(list(zip(next_hits, embeds_ids, embeds)), reverse=True)
+        else:
+            entries = list(zip(-np.array(embeds_ids), embeds_ids, embeds))
+        
+        for next_hit, embed_id, embed in entries:            
+            if self.capacity <= self.size():
+                # remove worst
+                max_hit, max_embed_id, max_embed = self.items[-1]
+                if max_hit <= next_hit:
                     self.items.pop()
                     evicted_items.append(max_embed_id)
                 else:

@@ -14,7 +14,7 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 import tqdm
 from cache import *
-from OPT import RelaxedLearnedOPT, RelaxedOPT, OPT
+from OPT import FreqOPT, RelaxedLearnedOPT, RelaxedOPT, OPT
 from reduce_dim import reduce_dim
 
 dataset_filenames = {
@@ -24,7 +24,7 @@ dataset_filenames = {
     "Steam": "datasets/embeds_steam.pkl",
 }
 has_gpu = False
-NUM_PROCS = 1
+NUM_PROCS = 2
 
 def plot(dataset_name, results):
     for prop_name, prop_results in results.items():
@@ -116,9 +116,9 @@ def main():
     batch_size = 1
     count_nn = 1
     num_samples = 10000
-    MAX_CACHE_SIZE = 0.25
+    MAX_CACHE_SIZE = 0.1
     dim = 384
-    same_embed_distance = 0.75
+    same_embed_distance = 0.5
     for dataset_name, embeds in load_embeds():
         embeds = reduce_dim(embeds, dim)
         print(f"loaded {dataset_name}...")
@@ -126,11 +126,12 @@ def main():
         print("loaded!")
         similar_embed_distance = 1.0
         caches = {
-            "RL_OPT": RelaxedLearnedOPT(same_embed_distance, dim=dim),
-            "R_OPT": RelaxedOPT(same_embed_distance, embeds),
-            "OPT": OPT(same_embed_distance, embeds),
+            "Freq": FreqOPT(same_embed_distance, dim=dim),
+            #"RL_OPT": RelaxedLearnedOPT(same_embed_distance, dim=dim),
+            #"R_OPT": RelaxedOPT(same_embed_distance, embeds),
+            #"OPT": OPT(same_embed_distance, embeds),
             #"TinyLFU": TinyLFU(same_embed_distance),
-            "RAP": RAP(same_embed_distance),
+            #"RAP": RAP(same_embed_distance),
             "LRU": LRU(same_embed_distance),
             #"PCA": PCA(same_embed_distance),
             #"Radius": FixedRadius(same_embed_distance, similar_embed_distance),

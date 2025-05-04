@@ -6,6 +6,7 @@ from sklearn.decomposition import PCA
 import tqdm
 
 from OPT import RLB_Reg, RelaxedLearnedOPT
+from freq_reg import FreqReg
 from reduce_dim import reduce_dim
 
 def reduce_dimension(name, X):
@@ -35,10 +36,10 @@ def load_embeds_covers():
 
 def load_embeds():
     filenames = {
-        "StackOverflow": "embeds_so.pkl",
         "Steam": "embeds_steam.pkl",
         "Bing": "embeds_bing.pkl",
-        "WildChat": "embeds_chat.pkl"
+        "WildChat": "embeds_chat.pkl",
+        "StackOverflow": "embeds_so.pkl",
     }
     embeds_dir = "datasets"
     for dataset_name, filename in filenames.items():
@@ -54,6 +55,15 @@ def load_embeds():
                     f"Embeddings for {dataset_name} must be a 2D array. Got shape: {embeds.shape}"
                 )
             yield dataset_name, embeds
+
+def get_counts_hits(embeds_covers, curr_embed_id, embeds_ids):
+    rel_covers = embeds_covers[embeds_ids]
+    next_hits = np.full(len(embeds_ids), 0)
+    for i_row, row in enumerate(rel_covers):
+        idx = row.searchsorted(curr_embed_id, side='right')
+        if len(row) > idx and len(row) > 0:
+            next_hits[i_row] = len(row) - idx
+    return next_hits
 
 def get_next_hits(embeds_covers, curr_embed_id, embeds_ids):
     rel_covers = embeds_covers[embeds_ids]
@@ -122,11 +132,11 @@ def test_regressor():
 def test_policy():
     DIM = 384
     DELTAS_COUNT = 8
-    STREAM_SIZE = 100000
-    CACHE_SIZE = 10000
-    BATCH_SIZE = 10
+    STREAM_SIZE = 10000
+    CACHE_SIZE = 640
+    BATCH_SIZE = 20
     COUNT_NN = 1
-    SAME_EMBED_DISTANCE = .85
+    SAME_EMBED_DISTANCE = .75
     BELADY_BOUNDARY_COE = 2.0
     # cache = LFU(SAME_EMBED_DISTANCE)    
     cache = RelaxedLearnedOPT(SAME_EMBED_DISTANCE, DELTAS_COUNT, 1, BELADY_BOUNDARY_COE, DIM)    
@@ -149,9 +159,38 @@ def test_policy():
                 print("GDR:", count_good_evicts / count_evicts, count_good_evicts, count_evicts)
                 print("LABELS", cache.reg.labeled_count)
             pbar.update(len(batch_embeds))
-                
-# GDR: 0.17
+
+def test_freq_reg():
+    DIM = 384
+    DELTAS_COUNT = 8
+    STREAM_SIZE = 100000
+    CACHE_SIZE = 10000
+    SAME_EMBED_DISTANCE = .5
+    BATCH_SIZE = 10
+    for dataset_name, embeds in load_embeds():
+        reg = FreqReg(CACHE_SIZE, CACHE_SIZE, DELTAS_COUNT, SAME_EMBED_DISTANCE, DIM)
+        embeds = reduce_dim(embeds, DIM, STREAM_SIZE)
+        print(dataset_name)
+        embeds = embeds[:STREAM_SIZE]
+        embeds_covers = create_embeds_covers(embeds, SAME_EMBED_DISTANCE)
+        total_mean = 0
+        total_count = 0
+        pbar = tqdm.tqdm(total=len(embeds), desc=f"Processing {dataset_name}...")
+        for batch_embeds, i_embeds in yield_batches(embeds, BATCH_SIZE):
+            pbar.update(len(batch_embeds))
+            if reg.is_trained():
+                predict = reg.predict(i_embeds, batch_embeds)
+                actual = get_counts_hits(embeds_covers, i_embeds[0], i_embeds)
+                actual = actual / (len(embeds) - np.array(i_embeds))
+                mean = np.mean(np.abs(actual - predict))
+                total_count += 1
+                n = total_count
+                total_mean = total_mean * (n-1)/n + mean / n
+            reg.record_for_training(i_embeds, batch_embeds)
+        print(total_mean)
+        
+    
 if __name__ == "__main__":
-    test_policy()
+    test_freq_reg()
 
                 
