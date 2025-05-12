@@ -1,53 +1,45 @@
 import os
 import pickle
 import numpy as np
-from sklearn.metrics import mean_squared_error  
-from sklearn.model_selection import train_test_split
-from xgboost import XGBRegressor
-from scipy.spatial import distance_matrix
 import faiss
+from sklearn.decomposition import PCA
+import tqdm
 
-class RegOPT:
-    def __init__(self):
-        self.reg = XGBRegressor(objective='reg:squarederror', device="cuda", verbosity="2", random_state=42)
-        self.same_embed_distance = 0.5
-    
-    def train(self, embeds):
-        embeds_covers = create_embeds_covers_faiss(embeds, self.same_embed_distance)
-        step = 1000
-        X_chunks = []
-        y_chunks = []
-        for i in range(0, len(embeds) - 2*step, step):
-            upper = min(i + step, len(embeds))
-            windows_size = step
-            embeds_ids = list(range(i, upper))
-            embeds_chunk = embeds[i:i+step]
-            features = extract_features(embeds_covers, upper, embeds_ids)
-            X_chunks.append(features)
-            labels = extract_labels(embeds_covers, upper, embeds_ids, windows_size)
-            y_chunks.append(labels)
-            print("processed", i, "embeds")
-        print(len(X_chunks), "chunks created")
-        X_flat = np.vstack(X_chunks)
-        y_flat = np.concatenate(y_chunks)
-        if X_flat.shape[0] != y_flat.shape[0]:
-            raise ValueError("Mismatch between number of samples in X and y")
-        print(f"Dataset {dataset_name}: {X_flat.shape[0]} samples with {X_flat.shape[1]} features")
-        X_train, X_test, y_train, y_test = train_test_split(X_flat, y_flat, test_size=0.2, random_state=42)
-        self.reg.fit(X_train, y_train)
-        print(f"Finished training on dataset: {dataset_name}\n")
-        y_pred = self.reg.predict(X_test)
-        mse = mean_squared_error(y_test, y_pred)
-        print(f"Dataset {dataset_name} MSE on validation set: {mse:.4f}\n")
-    
-    def predict(self, X):
-        return self.reg.predict(X)
+from OPT import RLB_Reg, RelaxedLearnedOPT
+from freq_reg import FreqReg
+from reduce_dim import reduce_dim
+
+def reduce_dimension(name, X):
+    pca = PCA(n_components=16, svd_solver='randomized')
+    X_reduced = pca.fit_transform(X)
+    with open(f"{name}_reduced.pkl", "wb") as f:
+        pickle.dump(X_reduced, f)
+
+def save_embeds():
+    SAME_EMBED_DISTANCE = .75
+    for dataset_name, embeds in load_embeds():
+        print(dataset_name)
+        for size_exp in range(3, 10):
+            size = 10 ** size_exp
+            print(size)
+            embeds_subset = embeds[:size]
+            embeds_covers = create_embeds_covers(embeds_subset, SAME_EMBED_DISTANCE)
+            file_name = f"{size}_{dataset_name}.json"
+            with open(file_name, "wb") as f:
+                pickle.dump(embeds_covers, f)
+            if len(embeds) <= size:
+                break
+
+def load_embeds_covers():
+    with open("1000000_StackOverflow.json", "rb") as f:
+        return pickle.load(f)
 
 def load_embeds():
     filenames = {
+        "Steam": "embeds_steam.pkl",
         "Bing": "embeds_bing.pkl",
+        "WildChat": "embeds_chat.pkl",
         "StackOverflow": "embeds_so.pkl",
-        "WildChat": "embeds_chat.pkl"
     }
     embeds_dir = "datasets"
     for dataset_name, filename in filenames.items():
@@ -64,7 +56,14 @@ def load_embeds():
                 )
             yield dataset_name, embeds
 
-
+def get_counts_hits(embeds_covers, curr_embed_id, embeds_ids):
+    rel_covers = embeds_covers[embeds_ids]
+    next_hits = np.full(len(embeds_ids), 0)
+    for i_row, row in enumerate(rel_covers):
+        idx = row.searchsorted(curr_embed_id, side='right')
+        if len(row) > idx and len(row) > 0:
+            next_hits[i_row] = len(row) - idx
+    return next_hits
 
 def get_next_hits(embeds_covers, curr_embed_id, embeds_ids):
     rel_covers = embeds_covers[embeds_ids]
@@ -83,64 +82,115 @@ def get_prev_hits(embeds_covers, curr_embed_id, embeds_ids):
         prev_hits.append(row[:idx])
     return np.array(prev_hits, dtype='object')
 
-def create_embeds_covers_distance_matrix(embeds, same_embed_distance):
-    embeds_distances = distance_matrix(embeds, embeds)
-    embeds_covers = (embeds_distances <= same_embed_distance).astype(int)
-    tri_l = np.tril_indices_from(embeds_covers)
-    embeds_covers[tri_l] = 0
-    return embeds_covers
-
-def create_embeds_covers_faiss(embeds, same_embed_distance):
+def create_embeds_covers(embeds, same_embed_distance):
     embeds = np.asarray(embeds, dtype=np.float32)
     n, d = embeds.shape
-    index = faiss.IndexFlatL2(d)
+    cpu_index = faiss.IndexFlatL2(d)
+    if faiss.get_num_gpus() > 0:
+        gpu_res = faiss.StandardGpuResources()
+        index = faiss.index_cpu_to_gpu(gpu_res, 0, cpu_index)
+    else:
+        index = cpu_index
     index.add(embeds)
     threshold = same_embed_distance ** 2
     lims, _, indices = index.range_search(embeds, threshold)
-    embeds_covers = []
-    for i in range(n):
-        i_covers = np.sort(np.array([j for j in indices[lims[i]:lims[i+1]] if j > i]))
-        embeds_covers.append(i_covers)
+    embeds_covers = [np.sort(indices[lims[i]:lims[i+1]][indices[lims[i]:lims[i+1]] > i]) for i in range(n)]
     return np.array(embeds_covers, dtype=object)
 
-def extract_labels(embeds_covers, curr_embed_id, cached_embeds_ids, window_size):
-    next_hits = get_next_hits(embeds_covers, curr_embed_id, cached_embeds_ids)
-    next_hits = next_hits - curr_embed_id
-    next_hits[next_hits > window_size] = 2 * window_size
-    return np.log(next_hits)
+def yield_batches(lst, k):
+    for i in range(0, len(lst), k):
+        yield lst[i:i + k], list(range(i, min(i+k, len(lst))))
 
-def pad_array(arr, N, v):
-    current_length = arr.shape[0]
-    if current_length < N:
-        pad_length = N - current_length
-        return np.pad(arr, (pad_length, 0), mode='constant', constant_values=v)
-    elif current_length > N:
-        return arr[-N:]
-    return arr
 
-def embed_pca_to_cluster_id(self, cluster_diameter, embed_pca):
-    unit_hypercube_diameter = np.sqrt(self.pca_dim)
-    hypercube_side_length = cluster_diameter / unit_hypercube_diameter
-    cluster_id = np.round(embed_pca / hypercube_side_length).astype(int)
-    return tuple(cluster_id)
-
-def extract_features(embeds_covers, curr_embed_id, cached_embeds_ids):
+def test_regressor():
+    DIM = 100
     DELTAS_COUNT = 8
-    PCA_DIM = 9
-    CLUSTER_DIAMETER = 1.0
-    past_hits = get_prev_hits(embeds_covers, curr_embed_id, cached_embeds_ids)
-    past_hits = [pad_array(v, DELTAS_COUNT, 1 + curr_embed_id) for v in past_hits]
-    past_hits = np.array(past_hits)
-    past_hits = past_hits - curr_embed_id
-    deltas = np.array(past_hits)
-    edc = np.stack([
-        np.sum(2 ** (deltas / (2 ** (9 + i))), axis=1)
-        for i in range(DELTAS_COUNT)
-    ], axis=1)
-    return deltas
-    #return np.hstack([deltas, edc])
-if __name__ == "__main__":
+    STREAM_SIZE = 200000
+    CACHE_SIZE = 64000
+    BELADY_BOUNDARY_COE = 2.0
+    SAME_EMBED_DISTANCE = .75
+    BATCH_SIZE = 16
     for dataset_name, embeds in load_embeds():
-        reg = RegOPT()
-        print(f"Processing dataset: {dataset_name}, length: {len(embeds)}")
-        reg.train(embeds)
+        reg = RLB_Reg(CACHE_SIZE, DELTAS_COUNT, SAME_EMBED_DISTANCE, BELADY_BOUNDARY_COE, DIM)
+        embeds = reduce_dim(embeds, DIM, STREAM_SIZE)
+        gdrs = []
+        print(dataset_name)
+        embeds = embeds[:STREAM_SIZE]
+        embeds_covers = create_embeds_covers(embeds, SAME_EMBED_DISTANCE)
+        for batch_embeds, i_embeds in yield_batches(embeds, BATCH_SIZE):
+            print(i_embeds[-1])
+            if reg.is_trained():
+                predict = reg.predict(i_embeds, batch_embeds)
+                predict = 2**predict
+                actual = get_next_hits(embeds_covers, i_embeds[0], i_embeds) - i_embeds
+                actual[np.isposinf(actual)] = 2 ** reg.get_default_label()
+                gdrs.append(abs(actual-predict).mean())
+                print(np.mean(gdrs))
+            reg.record_for_training(i_embeds, batch_embeds)
+            
+
+def test_policy():
+    DIM = 384
+    DELTAS_COUNT = 8
+    STREAM_SIZE = 10000
+    CACHE_SIZE = 640
+    BATCH_SIZE = 20
+    COUNT_NN = 1
+    SAME_EMBED_DISTANCE = .75
+    BELADY_BOUNDARY_COE = 2.0
+    # cache = LFU(SAME_EMBED_DISTANCE)    
+    cache = RelaxedLearnedOPT(SAME_EMBED_DISTANCE, DELTAS_COUNT, 1, BELADY_BOUNDARY_COE, DIM)    
+    for dataset_name, embeds in load_embeds():
+        embeds = embeds[:STREAM_SIZE]
+        embeds = reduce_dim(embeds, DIM)
+        pbar = tqdm.tqdm(total=len(embeds), desc=f"Processing {dataset_name}...")
+        embeds_covers = create_embeds_covers(embeds, SAME_EMBED_DISTANCE)
+        index = faiss.IndexIDMap2(faiss.IndexFlatL2(DIM))
+        cache.initialize(CACHE_SIZE, index)
+        count_evicts = 0
+        count_good_evicts = 0
+        for batch_embeds, i_embeds in yield_batches(embeds, BATCH_SIZE):
+            next_i_embed = i_embeds[-1]
+            iter_cache_hits, evicted_embeds_ids = cache.request(batch_embeds, i_embeds, COUNT_NN)
+            if len(evicted_embeds_ids) > 0:
+                count_evicts += len(evicted_embeds_ids)
+                next_hits = get_next_hits(embeds_covers, next_i_embed, evicted_embeds_ids) - i_embeds[-1]
+                count_good_evicts += len(np.where(next_hits >= BELADY_BOUNDARY_COE * CACHE_SIZE)[0])
+                print("GDR:", count_good_evicts / count_evicts, count_good_evicts, count_evicts)
+                print("LABELS", cache.reg.labeled_count)
+            pbar.update(len(batch_embeds))
+
+def test_freq_reg():
+    DIM = 384
+    DELTAS_COUNT = 8
+    STREAM_SIZE = 100000
+    CACHE_SIZE = 10000
+    SAME_EMBED_DISTANCE = .5
+    BATCH_SIZE = 10
+    for dataset_name, embeds in load_embeds():
+        reg = FreqReg(CACHE_SIZE, CACHE_SIZE, DELTAS_COUNT, SAME_EMBED_DISTANCE, DIM)
+        embeds = reduce_dim(embeds, DIM, STREAM_SIZE)
+        print(dataset_name)
+        embeds = embeds[:STREAM_SIZE]
+        embeds_covers = create_embeds_covers(embeds, SAME_EMBED_DISTANCE)
+        total_mean = 0
+        total_count = 0
+        pbar = tqdm.tqdm(total=len(embeds), desc=f"Processing {dataset_name}...")
+        for batch_embeds, i_embeds in yield_batches(embeds, BATCH_SIZE):
+            pbar.update(len(batch_embeds))
+            if reg.is_trained():
+                predict = reg.predict(i_embeds, batch_embeds)
+                actual = get_counts_hits(embeds_covers, i_embeds[0], i_embeds)
+                actual = actual / (len(embeds) - np.array(i_embeds))
+                mean = np.mean(np.abs(actual - predict))
+                total_count += 1
+                n = total_count
+                total_mean = total_mean * (n-1)/n + mean / n
+            reg.record_for_training(i_embeds, batch_embeds)
+        print(total_mean)
+        
+    
+if __name__ == "__main__":
+    test_freq_reg()
+
+                

@@ -1,0 +1,9 @@
+tqdm
+datasets
+sentence_transformers
+faiss-cpu
+pandas
+numpy
+matplotlib
+scipy
+lightgbm

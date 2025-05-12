@@ -267,7 +267,7 @@ class LRU(Cache):
         if additions_ids:
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         for _ in range(count_remove):
-            embed_id, _ = self.items.popitem()
+            embed_id, _ = self.items.popitem(last = False)
             evicted_items.append(embed_id)
         if evicted_items:
             self.index.remove_ids(np.array(evicted_items))
