@@ -76,7 +76,6 @@ class LFU(Cache):
         self.items = {}
         super().initialize(capacity, index)
 
-
     def request(self, embeds, embeds_ids, count_nn=1):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
@@ -89,10 +88,16 @@ class LFU(Cache):
         for i_embed, i_nn in zip(*cache_hits_indices):
             cand = closest_ids[i_embed][i_nn]
             self.items[cand] += 1
-        for _ in range(count_remove):
-            evicted_embed_id = min(self.items, key=self.items.get)
-            del self.items[evicted_embed_id]
-            evicted_items.append(evicted_embed_id)
+
+        needed_space = len(embeds)
+        current_size = self.size()
+        count_remove = max(0, (current_size + needed_space) - self.capacity)
+        if count_remove > 0:
+            least_used = heapq.nsmallest(count_remove, self.items.items(), key=lambda x: x[1])
+            for embed_id, _ in least_used:
+                del self.items[embed_id]
+                evicted_items.append(embed_id)
+
         for embed_id, embed in zip(embeds_ids, embeds):
             self.items[embed_id] = 0
             additions_embeds.append(embed)

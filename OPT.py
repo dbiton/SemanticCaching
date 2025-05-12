@@ -376,16 +376,18 @@ class FreqOPT(Cache):
                 self.train_counter += 1
                 _, all_embeds_ids, all_embeds = zip(*self.items)
                 all_next_hits = self.predict(all_embeds_ids, all_embeds)
-                self.items = sorted(list(zip(all_next_hits, all_embeds_ids, all_embeds)))
+                self.items = sorted(list(zip(all_next_hits, -np.array(all_embeds_ids), all_embeds)))
             next_hits = self.predict(embeds_ids, embeds)
-            entries = sorted(list(zip(next_hits, embeds_ids, embeds)), reverse=True)
+            entries = sorted(list(zip(next_hits, -np.array(embeds_ids), embeds)), reverse=True)
         else:
             entries = list(zip(-np.array(embeds_ids), embeds_ids, embeds))
         
-        for next_hit, embed_id, embed in entries:            
+        for next_hit, minus_embed_id, embed in entries:
+            embed_id = -minus_embed_id            
             if self.capacity <= self.size():
                 # remove worst
-                max_hit, max_embed_id, max_embed = self.items[-1]
+                max_hit, minus_max_embed_id, max_embed = self.items[-1]
+                max_embed_id = -minus_max_embed_id
                 if max_hit <= next_hit:
                     self.items.pop()
                     evicted_items.append(max_embed_id)
