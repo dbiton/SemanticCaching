@@ -1,4 +1,4 @@
-from collections import OrderedDict
+from heapdict import heapdict
 
 import numpy as np
 from cache import Cache
@@ -9,7 +9,7 @@ class LRFU(Cache):
         self.decay_coe = decay_coe
 
     def initialize(self, capacity: int, index):
-        self.items = OrderedDict()
+        self.items = heapdict()
         super().initialize(capacity, index)
         self.time = 0
 
@@ -41,8 +41,7 @@ class LRFU(Cache):
         if additions_ids:
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         for _ in range(count_remove):
-            evict_key = min(self.items.items(), key=lambda item: self._decayed_crf(item[1][0], item[1][1]))[0]
-            del self.items[evict_key]
+            evict_key, _ = self.items.popitem()
             evicted_items.append(evict_key)
         if evicted_items:
             self.index.remove_ids(np.array(evicted_items))
