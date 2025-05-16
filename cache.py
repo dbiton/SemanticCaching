@@ -108,6 +108,61 @@ class LFU(Cache):
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
+class SphereQueryLFU(Cache):
+    def __init__(self, same_embed_distance):
+        super().__init__(same_embed_distance)
+
+    def initialize(self, capacity: int, index):
+        # Use a dict mapping embed_id -> frequency (access count)
+        self.items = {}
+        super().initialize(capacity, index)
+
+    def get_in_range_stored_embeds(self, embeds, radius):
+        radius_squared = radius ** 2
+        lims, dist2, ids = self.index.range_search(embeds, radius_squared)
+        dists = np.sqrt(dist2)
+        formatted_dists = []
+        formatted_ids = []
+        start_index = 0
+        for lim in lims[1:]:
+            end_index = lim
+            formatted_dists.append(dists[start_index:end_index])
+            formatted_ids.append(ids[start_index:end_index])
+            start_index = end_index
+        return np.array(formatted_dists, dtype=object), np.array(formatted_ids, dtype=object)
+    
+    def request(self, embeds, embeds_ids, count_nn=1):
+        closest_dists, closest_ids = self.get_in_range_stored_embeds(embeds, self.same_embed_distance)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.count_nonzero(mask, axis=1)
+        evicted_items = []
+        additions_embeds = []
+        additions_ids = []
+        count_remove = max(0, (len(embeds) + self.size()) - self.capacity)
+        for i_embed, i_nn in zip(*cache_hits_indices):
+            cand = closest_ids[i_embed][i_nn]
+            self.items[cand] += 1
+
+        needed_space = len(embeds)
+        current_size = self.size()
+        count_remove = max(0, (current_size + needed_space) - self.capacity)
+        if count_remove > 0:
+            least_used = heapq.nsmallest(count_remove, self.items.items(), key=lambda x: x[1])
+            for embed_id, _ in least_used:
+                del self.items[embed_id]
+                evicted_items.append(embed_id)
+
+        for embed_id, embed in zip(embeds_ids, embeds):
+            self.items[embed_id] = 0
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
+        if additions_ids:
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        return cache_hits, evicted_items
+
 class DistanceLFU(Cache):
     def __init__(self, same_embed_distance):
         super().__init__(same_embed_distance)
