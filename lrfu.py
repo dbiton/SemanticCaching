@@ -2,7 +2,7 @@ from heapdict import heapdict
 
 import numpy as np
 from cache import Cache
-
+from hill_climber import HillClimber
 class LRFU(Cache):
     def __init__(self, same_embed_distance, decay_coe: float):
         super().__init__(same_embed_distance)
@@ -47,3 +47,36 @@ class LRFU(Cache):
             self.index.remove_ids(np.array(evicted_items))
         self.time += len(embeds)
         return cache_hits, evicted_items
+
+class HillClimbingLRFU(LRFU):
+    def __init__(self, same_embed_distance, decay_coe: float, window_size: int):
+        self.window_size = window_size
+        super().__init__(same_embed_distance, decay_coe)
+
+    def initialize(self, capacity: int, index):
+        super().initialize(capacity, index)
+        self.window_hits = 0
+        self.window_counter = 0
+        self.hill_climber = HillClimber(max_val=1, initial_value=self.decay_coe)
+
+    def request(self, embeds, embeds_ids, count_nn=1):
+        cache_hits, evicted_items = super().request(embeds, embeds_ids, count_nn)
+        self.window_counter += len(embeds)
+        self.window_hits += np.count_nonzero(cache_hits)
+        if self.window_counter >= self.window_size:
+            score = self.window_hits / self.window_counter
+            self.hill_climber.update(score)
+            self.decay_coe = self.hill_climber.propose()
+            print("Score", score, "Lambda", self.decay_coe)
+            self.window_hits = 0
+            self.window_counter = 0
+        return cache_hits, evicted_items
+        
+class DeltaLRFU(LRFU):
+    def __init__(self, same_embed_distance, decay_coe: float, lambda_delta: float):
+        self.lambda_delta = lambda_delta
+        super().__init__(same_embed_distance, decay_coe)
+
+    def request(self, embeds, embeds_ids, count_nn=1):
+        self.decay_coe += self.lambda_delta * len(embeds) 
+        return super().request(embeds, embeds_ids, count_nn)

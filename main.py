@@ -15,6 +15,7 @@ from sentence_transformers import SentenceTransformer
 import tqdm
 from cache import *
 from OPT import FreqOPT, RelaxedLearnedOPT, RelaxedOPT, OPT
+from lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
 from reduce_dim import reduce_dim
 
 dataset_filenames = {
@@ -24,7 +25,7 @@ dataset_filenames = {
     "Steam": "datasets/embeds_steam.pkl",
 }
 has_gpu = False
-NUM_PROCS = 2
+NUM_PROCS = 4
 
 def plot(dataset_name, results):
     for prop_name, prop_results in results.items():
@@ -115,23 +116,28 @@ def process_layered(args):
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 10000
-    MAX_CACHE_SIZE = 0.1
-    dim = 384
+    num_samples = 100000
+    MAX_CACHE_SIZE = 0.5
+    COUNT_STEPS = 10
+    dim = 100
     same_embed_distance = 0.5
     for dataset_name, embeds in load_embeds():
         embeds = reduce_dim(embeds, dim)
-        print(f"loaded {dataset_name}...")
+        print(f"loaded {dataset_name} with {len(embeds)} examples...")
         embeds = embeds[:num_samples]
         print("loaded!")
-        similar_embed_distance = 1.0
         caches = {
-            "Freq": FreqOPT(same_embed_distance, dim=dim),
+            #"Freq": FreqOPT(same_embed_distance, dim=dim),
             #"RL_OPT": RelaxedLearnedOPT(same_embed_distance, dim=dim),
             #"R_OPT": RelaxedOPT(same_embed_distance, embeds),
             #"OPT": OPT(same_embed_distance, embeds),
+            #"BetterTinyLFU": BetterTinyLFU(same_embed_distance),
             #"TinyLFU": TinyLFU(same_embed_distance),
             #"RAP": RAP(same_embed_distance),
+            "HillClimbingLRFU": HillClimbingLRFU(same_embed_distance, .1, num_samples // 25),
+            "LRFU.1": LRFU(same_embed_distance, .1),
+            "LRFU.01": LRFU(same_embed_distance, .01),
+            "LRFU1.": LRFU(same_embed_distance, 1),
             "LRU": LRU(same_embed_distance),
             #"PCA": PCA(same_embed_distance),
             #"Radius": FixedRadius(same_embed_distance, similar_embed_distance),
@@ -139,12 +145,12 @@ def main():
             #"RR": RR(same_embed_distance),
             #"DistanceLFU": DistanceLFU(same_embed_distance),
             "LFU": LFU(same_embed_distance),
+            #"SphereLFU": SphereQueryLFU(same_embed_distance),
             #"DALFU": PeriodicAgingLFU(same_embed_distance, aging_interval=720, aging_factor=0.5),
         }
 
         results = {}
         args = []
-        COUNT_STEPS = 10
         for cache_name, cache in caches.items():
             step_size = int(num_samples * MAX_CACHE_SIZE // COUNT_STEPS)
             for cache_size in range(step_size, int(num_samples * MAX_CACHE_SIZE), step_size):
@@ -154,12 +160,10 @@ def main():
             pbar = tqdm.tqdm(total=2*len(args), desc=f"Processing {dataset_name} with {num_batches} batches")
             args = [(None, *arg) for arg in args]
             with ProcessPoolExecutor(NUM_PROCS) as executor:
-                # raw_results = chain(executor.map(process_layered, args), executor.map(process, args))
                 raw_results = executor.map(process, args)
         else:
             pbar = tqdm.tqdm(total=2*num_batches, desc=f"Processing {dataset_name} with {num_batches} batches")
             args = [(pbar, *arg) for arg in args]
-            # raw_results = chain(map(process_layered, args), map(process, args))
             raw_results = map(process, args)
             
         for iter_results in raw_results:
