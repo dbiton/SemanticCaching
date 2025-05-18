@@ -484,13 +484,102 @@ class PCA(Cache):
                 self.items[embed_id] = cluster_id
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
+
+class BetterTinyLFU(Cache):
+    def __init__(self, same_embed_distance):
+        super().__init__(same_embed_distance)
+    
+    def initialize(self, capacity: int, index):
+        self.decay_factor = 0.5
+        self.sample_counter = 0
+        self.sample_size = int(10 * capacity)
+        self.freq_sketch = defaultdict(int)
+        self.capacity = capacity
+        self.index = index
+        self.index_freq = faiss.IndexIDMap2(faiss.IndexFlatL2(index.d))
+        self.items = OrderedDict()
+
+    def decay_frequencies(self):
+        evicted_items = []
+        self.sample_counter *= self.decay_factor
+        for key in list(self.freq_sketch.keys()):
+            self.freq_sketch[key] = int(self.freq_sketch[key] * self.decay_factor)
+            if self.freq_sketch[key] == 0:
+                del self.freq_sketch[key]
+                evicted_items.append(key)
+        self.index_freq.remove_ids(np.array(evicted_items))
+        return evicted_items
+
+    def get_in_range_freq_embeds(self, embeds, radius):
+        radius_squared = radius ** 2
+        lims, dist2, ids = self.index_freq.range_search(embeds, radius_squared)
+        dists = np.sqrt(dist2)
+        formatted_dists = []
+        formatted_ids = []
+        start_index = 0
+        for lim in lims[1:]:
+            end_index = lim
+            formatted_dists.append(dists[start_index:end_index])
+            formatted_ids.append(ids[start_index:end_index])
+            start_index = end_index
+        return np.array(formatted_dists, dtype=object), np.array(formatted_ids, dtype=object)
+    
+    def update_frequencies(self, embeds, embeds_ids):
+        _, closest_ids = self.get_in_range_freq_embeds(embeds, self.same_embed_distance)
+        embed_frequencies = []
+        for embed_id, embed_closest_ids in zip(embeds_ids, closest_ids):
+            freq = 0
+            for embed_neigh_id in embed_closest_ids:
+                self.freq_sketch[embed_neigh_id] += 1
+                self.items.move_to_end(embed_neigh_id)
+                freq += self.freq_sketch[embed_neigh_id]
+            embed_frequencies.append(freq)
+        return embed_frequencies
+    
+    def request(self, embeds, embeds_ids, count_nn=1):
+        closest_dists, closest_ids = self.get_in_range_stored_embeds(embeds, self.same_embed_distance)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits = np.count_nonzero(mask, axis=1)
+        removals = []
+        additions_embeds = []
+        additions_ids = []
+        embed_frequencies = self.update_frequencies(embeds, embeds_ids)
+        
+        for embed_id, embed, embed_freq, embed_hits in zip(embeds_ids, embeds, embed_frequencies, cache_hits):
+            self.sample_counter += 1
+            if self.size() <= self.capacity:
+                self.items[embed_id] = None
+                additions_ids.append(embed_id)
+                additions_embeds.append(embed)
+            elif embed_hits == 0:
+                victim_embed_id, _ = next(iter(self.items.items()))
+                victim_freq = self.freq_sketch[victim_embed_id]
+                if embed_freq > victim_freq:
+                    self.items.popitem(last=False)
+                    removals.append(victim_embed_id)
+                    self.items[embed_id] = None
+                    additions_ids.append(embed_id)
+                    additions_embeds.append(embed)
+                else:
+                    removals.append(embed_id)
+        
+        while self.sample_counter >= self.sample_size:
+            removals += self.decay_frequencies()
+        
+        if removals:
+            self.index.remove_ids(np.array(removals))
+        if additions_ids:
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+
+        return cache_hits, removals
+    
 class TinyLFU(Cache):
     def __init__(self, same_embed_distance):
         super().__init__(same_embed_distance)
 
     def decay_frequencies(self):
+        self.sample_counter -= self.sample_size
         evicted_items = []
-        self.sample_counter *= self.decay_factor
         for key in list(self.freq_sketch.keys()):
             self.freq_sketch[key] = int(self.freq_sketch[key] * self.decay_factor)
             if self.freq_sketch[key] == 0:
@@ -523,7 +612,7 @@ class TinyLFU(Cache):
                 self.items.move_to_end(embed_neigh_id)
                 freq += self.freq_sketch[embed_neigh_id]
             embed_frequencies.append(freq)
-        
+
         for embed_id, embed, embed_freq, embed_hits in zip(embeds_ids, embeds, embed_frequencies, cache_hits):
             self.sample_counter += 1
             if self.size() <= self.capacity:
