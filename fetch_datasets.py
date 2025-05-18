@@ -82,6 +82,14 @@ def writer(path):
             raise
 
 if __name__ == "__main__":
+    print("generating ComQA...")
+    with writer(os.path.join(embeds_dir, "embeds_ComQA.pkl")) as f:
+        if f is not None:
+            ds_ComQA = load_dataset("dbiton/ComQA")
+            questions_ComQA = ds_ComQA['train']['text']
+            embeds_ComQA = embed_strings(questions_ComQA)
+            pickle.dump(embeds_ComQA, f)
+    
     print("generating bing...")
     with writer(os.path.join(embeds_dir, "embeds_bing.pkl")) as f:
         if f is not None:

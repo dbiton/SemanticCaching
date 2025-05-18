@@ -19,13 +19,14 @@ from lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
 from reduce_dim import reduce_dim
 
 dataset_filenames = {
-    "Bing": "datasets/embeds_bing.pkl",
-    "StackOverflow": "datasets/embeds_so.pkl",
-    "WildChat": "datasets/embeds_chat.pkl",
-    "Steam": "datasets/embeds_steam.pkl",
+    "ComQA": "datasets/embeds_ComQA.pkl",
+    #"Bing": "datasets/embeds_bing.pkl",
+    #"StackOverflow": "datasets/embeds_so.pkl",
+    #"WildChat": "datasets/embeds_chat.pkl",
+    #"Steam": "datasets/embeds_steam.pkl",
 }
 has_gpu = False
-NUM_PROCS = 4
+NUM_PROCS = 1
 
 def plot(dataset_name, results):
     for prop_name, prop_results in results.items():
@@ -116,10 +117,10 @@ def process_layered(args):
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 100000
+    num_samples = 5000
     MAX_CACHE_SIZE = 0.5
     COUNT_STEPS = 10
-    dim = 100
+    dim = 384
     same_embed_distance = 0.5
     for dataset_name, embeds in load_embeds():
         embeds = reduce_dim(embeds, dim)
@@ -134,10 +135,10 @@ def main():
             #"BetterTinyLFU": BetterTinyLFU(same_embed_distance),
             #"TinyLFU": TinyLFU(same_embed_distance),
             #"RAP": RAP(same_embed_distance),
-            "HillClimbingLRFU": HillClimbingLRFU(same_embed_distance, .1, num_samples // 25),
-            "LRFU.1": LRFU(same_embed_distance, .1),
-            "LRFU.01": LRFU(same_embed_distance, .01),
-            "LRFU1.": LRFU(same_embed_distance, 1),
+            #"HillClimbingLRFU": HillClimbingLRFU(same_embed_distance, .1, num_samples // 25),
+            #"LRFU.1": LRFU(same_embed_distance, .1),
+            #"LRFU.01": LRFU(same_embed_distance, .01),
+            #"LRFU1.": LRFU(same_embed_distance, 1),
             "LRU": LRU(same_embed_distance),
             #"PCA": PCA(same_embed_distance),
             #"Radius": FixedRadius(same_embed_distance, similar_embed_distance),
