@@ -141,8 +141,9 @@ class SphereQueryLFU(Cache):
         additions_ids = []
         count_remove = max(0, (len(embeds) + self.size()) - self.capacity)
         for i_embed, i_nn in zip(*cache_hits_indices):
+            embed_count_hits = len(closest_ids[i_embed])
             cand = closest_ids[i_embed][i_nn]
-            self.items[cand] += 1
+            self.items[cand] += 1 / embed_count_hits
 
         needed_space = len(embeds)
         current_size = self.size()
@@ -530,7 +531,8 @@ class BetterTinyLFU(Cache):
         for embed_id, embed_closest_ids in zip(embeds_ids, closest_ids):
             freq = 0
             for embed_neigh_id in embed_closest_ids:
-                self.freq_sketch[embed_neigh_id] += 1
+                embed_count_hits = len(embed_closest_ids)
+                self.freq_sketch[embed_neigh_id] += 1 / embed_count_hits
                 self.items.move_to_end(embed_neigh_id)
                 freq += self.freq_sketch[embed_neigh_id]
             embed_frequencies.append(freq)
@@ -608,7 +610,8 @@ class TinyLFU(Cache):
         for embed_id, embed_closest_ids in zip(embeds_ids, closest_ids):
             freq = 0
             for embed_neigh_id in embed_closest_ids:
-                self.freq_sketch[embed_neigh_id] += 1
+                count_neighs = len(embed_closest_ids)
+                self.freq_sketch[embed_neigh_id] += 1 / count_neighs
                 self.items.move_to_end(embed_neigh_id)
                 freq += self.freq_sketch[embed_neigh_id]
             embed_frequencies.append(freq)
