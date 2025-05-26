@@ -6,6 +6,8 @@ import numpy as np
 from scipy.spatial import distance_matrix
 import faiss
 
+from estimate_frequency import calculate_perplexity, calculate_surprisal
+
 
 class Cache:
     def __init__(self, same_embed_distance: float):
@@ -18,7 +20,7 @@ class Cache:
         self.capacity = capacity
         self.index = index
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         raise NotImplementedError("virtual method")
 
     def get_closest_stored_embeds(self, embeds, count_nn=1):
@@ -51,7 +53,7 @@ class Dummy(Cache):
     def initialize(self, capacity: int, index):
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         shape = (len(embeds),)
         return np.zeros(shape, dtype=bool), embeds_ids
 
@@ -65,7 +67,7 @@ class RR(Cache):
         self.items = []
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         assert(len(embeds) < self.capacity)
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
@@ -90,7 +92,7 @@ class LFU(Cache):
         self.items = {}
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
@@ -122,6 +124,43 @@ class LFU(Cache):
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
+class Perplexity(Cache):
+    def __init__(self, same_embed_distance):
+        super().__init__(same_embed_distance)
+
+    def initialize(self, capacity: int, index):
+        self.items = {}
+        super().initialize(capacity, index)
+
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.count_nonzero(mask, axis=1)
+        evicted_items = []
+        additions_embeds = []
+        additions_ids = []
+        count_remove = max(0, (len(embeds) + self.size()) - self.capacity)
+
+        needed_space = len(embeds)
+        current_size = self.size()
+        count_remove = max(0, (current_size + needed_space) - self.capacity)
+        if count_remove > 0:
+            least_used = heapq.nsmallest(count_remove, self.items.items(), key=lambda x: x[1])
+            for embed_id, _ in least_used:
+                del self.items[embed_id]
+                evicted_items.append(embed_id)
+
+        for embed_id, embed, text in zip(embeds_ids, embeds, texts):
+            self.items[embed_id] = -calculate_surprisal(text)
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
+        if additions_ids:
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        return cache_hits, evicted_items
+
 class SphereQueryLFU(Cache):
     def __init__(self, same_embed_distance):
         super().__init__(same_embed_distance)
@@ -131,7 +170,7 @@ class SphereQueryLFU(Cache):
         self.items = {}
         super().initialize(capacity, index)
     
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_in_range_stored_embeds(embeds, self.same_embed_distance)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
@@ -172,7 +211,7 @@ class DistanceLFU(Cache):
         self.items = {}
         super().initialize(capacity, index)
     
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
@@ -215,7 +254,7 @@ class DynamicAgingLFU(Cache):
         embed_id, (hit_score, last_epoch) = items_entry
         return hit_score / (self.epoch - last_epoch + 1)
     
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
@@ -268,7 +307,7 @@ class PeriodicAgingLFU(Cache):
         self.time_since_aging = 0  # might be bad if epoch can increase indefinitely
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
@@ -309,7 +348,7 @@ class LRU(Cache):
         self.items = OrderedDict()
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
@@ -342,7 +381,7 @@ class RAP(Cache):
         self.items = {}
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
@@ -383,7 +422,7 @@ class FixedRadius(Cache):
         self.items = {}
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
@@ -453,7 +492,7 @@ class PCA(Cache):
         self.items = {}
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         self.train_counter += len(embeds)
         if self.train_counter >= self.capacity:
             self.train_counter = 0
@@ -538,7 +577,7 @@ class BetterTinyLFU(Cache):
             embed_frequencies.append(freq)
         return embed_frequencies
     
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_in_range_stored_embeds(embeds, self.same_embed_distance)
         mask = closest_dists < self.same_embed_distance
         cache_hits = np.count_nonzero(mask, axis=1)
@@ -596,7 +635,7 @@ class TinyLFU(Cache):
         self.index = index
         self.items = OrderedDict()
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_in_range_stored_embeds(embeds, self.same_embed_distance)
         mask = closest_dists < self.same_embed_distance
         cache_hits = np.count_nonzero(mask, axis=1)

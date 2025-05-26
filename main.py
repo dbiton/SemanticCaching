@@ -19,12 +19,13 @@ from lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
 from reduce_dim import reduce_dim
 
 dataset_filenames = {
-    "ComQA": "datasets/embeds_ComQA.pkl",
-    #"Bing": "datasets/embeds_bing.pkl",
-    #"StackOverflow": "datasets/embeds_so.pkl",
+    "Bing": "datasets_text/embeds_bing.pkl",
+    "StackOverflow": "datasets_text/embeds_so.pkl",
+    "ComQA": "datasets_text/embeds_ComQA.pkl",
     #"WildChat": "datasets/embeds_chat.pkl",
     #"Steam": "datasets/embeds_steam.pkl",
 }
+
 has_gpu = False
 NUM_PROCS = 1
 
@@ -71,7 +72,9 @@ def process(args):
     cache_hits = 0
     t0 = time.time()
     for batch_embeds, i_embeds in yield_batches(embeds, batch_size):
-        iter_cache_hits, evicted_embeds_ids = cache.request(batch_embeds, i_embeds, count_nn)
+        embeds_texts = [v for (_, v) in batch_embeds]
+        embeds_embeds = np.array([v for (v, _) in batch_embeds])
+        iter_cache_hits, evicted_embeds_ids = cache.request(embeds_embeds, i_embeds, count_nn, embeds_texts)
         cache_hits += np.count_nonzero(iter_cache_hits)
         if pbar is not None: pbar.update(1)
     iter_results = {
@@ -117,17 +120,19 @@ def process_layered(args):
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 5000
+    num_samples = 50000
     MAX_CACHE_SIZE = 0.5
     COUNT_STEPS = 10
     dim = 384
     same_embed_distance = 0.5
-    for dataset_name, embeds in load_embeds():
-        embeds = reduce_dim(embeds, dim)
-        print(f"loaded {dataset_name} with {len(embeds)} examples...")
-        embeds = embeds[:num_samples]
+    for dataset_name, data in load_embeds():
+        print(f"loaded {dataset_name} with {len(data['embeds'])} examples...")
+        preps = data['text'][:num_samples]
+        embeds = list(zip(data['embeds'][:num_samples], preps))
+        
         print("loaded!")
         caches = {
+            "Perplexity": Perplexity(same_embed_distance),
             #"Freq": FreqOPT(same_embed_distance, dim=dim),
             #"RL_OPT": RelaxedLearnedOPT(same_embed_distance, dim=dim),
             #"R_OPT": RelaxedOPT(same_embed_distance, embeds),
