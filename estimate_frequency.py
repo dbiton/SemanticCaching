@@ -72,22 +72,22 @@ def generate_dataset(output_path: str) -> None:
                         country = prompt['country']
                         state = prompt['state']
                         role = prompt['role']
-                        perplexity = calculate_perplexity(sentence)
-                        uniqueness = calculate_surprisal(sentence)
-                        embedding = calculate_embedding(sentence)
+                        # perplexity = calculate_perplexity(sentence)
+                        surprisal = calculate_surprisal(sentence)
+                        # embedding = calculate_embedding(sentence)
                         entry = {
-                            "sentence": sentence,
-                            "embedding": embedding,
-                            "role": role,
-                            "conv_index": i / 2,
-                            "perplexity": perplexity,
-                            "uniqueness": uniqueness,
+                            #"sentence": sentence,
+                            #"embedding": embedding,
+                            #"role": role,
+                            #"conv_index": i / 2,
+                            #"perplexity": perplexity,
+                            "surprisal": surprisal,
                             "num_words": len(sentence.split()),
                             "num_chars": len(sentence),
-                            "is_toxic": is_toxic,
-                            "is_redacted": is_redacted,
-                            "country": country,
-                            "state": state
+                            #"is_toxic": is_toxic,
+                            #"is_redacted": is_redacted,
+                            #"country": country,
+                            #"state": state
                         }
                         json.dump(entry, f_out)
                         f_out.write('\n')
@@ -138,7 +138,8 @@ def train(ds_path, res_path):
         y = ujson.load(f)
     y = [v/len(y) for v in y]
     X = pd.DataFrame(X)
-    X = X[['conv_index', 'perplexity', 'uniqueness', 'num_words', 'num_chars', 'is_toxic', 'is_redacted']]
+    X = X[['uniqueness']] # 0.6801
+    # X = X[['uniqueness', 'num_words', 'num_chars']] 0.8493 (perplexity seems to be the most useful)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     reg = lgb.LGBMRegressor()
     reg.fit(X_train, y_train)
@@ -165,4 +166,4 @@ def train(ds_path, res_path):
 
 # generate_dataset("ds.json")
 # generate_results("ds.json", "res.json")
-# train("ds.json", "res.json")
+train("ds.json", "res.json")

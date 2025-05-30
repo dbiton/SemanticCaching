@@ -22,12 +22,12 @@ dataset_filenames = {
     "Bing": "datasets_text/embeds_bing.pkl",
     "StackOverflow": "datasets_text/embeds_so.pkl",
     "ComQA": "datasets_text/embeds_ComQA.pkl",
-    #"WildChat": "datasets/embeds_chat.pkl",
+    "WildChat": "datasets_text/embeds_chat.pkl",
     #"Steam": "datasets/embeds_steam.pkl",
 }
 
 has_gpu = False
-NUM_PROCS = 1
+NUM_PROCS = 3
 
 def plot(dataset_name, results):
     for prop_name, prop_results in results.items():
@@ -120,8 +120,8 @@ def process_layered(args):
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 50000
-    MAX_CACHE_SIZE = 0.5
+    num_samples = 1000
+    MAX_CACHE_SIZE = 0.1
     COUNT_STEPS = 10
     dim = 384
     same_embed_distance = 0.5
@@ -129,14 +129,13 @@ def main():
         print(f"loaded {dataset_name} with {len(data['embeds'])} examples...")
         preps = data['text'][:num_samples]
         embeds = list(zip(data['embeds'][:num_samples], preps))
-        
         print("loaded!")
         caches = {
-            "Perplexity": Perplexity(same_embed_distance),
+            "Perplexity": Surprisal(same_embed_distance),
             #"Freq": FreqOPT(same_embed_distance, dim=dim),
             #"RL_OPT": RelaxedLearnedOPT(same_embed_distance, dim=dim),
             #"R_OPT": RelaxedOPT(same_embed_distance, embeds),
-            #"OPT": OPT(same_embed_distance, embeds),
+            # "OPT": OPT(same_embed_distance, embeds),
             #"BetterTinyLFU": BetterTinyLFU(same_embed_distance),
             #"TinyLFU": TinyLFU(same_embed_distance),
             #"RAP": RAP(same_embed_distance),
