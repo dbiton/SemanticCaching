@@ -10,7 +10,7 @@ from sentence_transformers import SentenceTransformer
 from contextlib import contextmanager
 from tempfile import NamedTemporaryFile
 
-embeds_dir = "datasets"
+embeds_dir = "datasets_text"
 
 # dataset specific params
 steam_full = False
@@ -88,7 +88,15 @@ if __name__ == "__main__":
             ds_bing = load_dataset("corbyrosset/researchy_questions")
             questions_bing = ds_bing['train']['question']
             embeds_bing = embed_strings(questions_bing)
-            pickle.dump(embeds_bing, f)
+            pickle.dump({"text": questions_bing, "embeds": embeds_bing}, f)
+    
+    print("generating ComQA...")
+    with writer(os.path.join(embeds_dir, "embeds_ComQA.pkl")) as f:
+        if f is not None:
+            ds_ComQA = load_dataset("dbiton/ComQA")
+            questions_ComQA = ds_ComQA['train']['text']
+            embeds_ComQA = embed_strings(questions_ComQA)
+            pickle.dump({"text": questions_ComQA, "embeds": embeds_ComQA}, f)
 
     print("generating so...")
     with writer(os.path.join(embeds_dir, "embeds_so.pkl")) as f:
@@ -96,7 +104,7 @@ if __name__ == "__main__":
             ds_so = load_dataset("pacovaldez/stackoverflow-questions")
             questions_so = ds_so['train']['title']
             embeds_so = embed_strings(questions_so)
-            pickle.dump(embeds_so, f)
+            pickle.dump({"text": questions_so, "embeds": embeds_so}, f)
 
     print("generating chat...")
     with writer(os.path.join(embeds_dir, "embeds_chat.pkl")) as f:
@@ -104,8 +112,8 @@ if __name__ == "__main__":
             ds_chat = load_dataset("allenai/WildChat-1M")
             questions_chat = [e['conversation'][0]['content'] for e in ds_chat['train'] if e['language'] == "English"]
             embeds_chat = embed_strings(questions_chat)
-            pickle.dump(embeds_chat, f)
-    
+            pickle.dump({"text": questions_chat, "embeds": embeds_chat}, f)
+    '''
     if steam_full:
         print("generating steam...")
         with writer(os.path.join(embeds_dir, f"embeds_steam_{steam_limit}_{steam_seed}.parquet")) as f:
@@ -131,3 +139,4 @@ if __name__ == "__main__":
                 ds_steam = load_dataset("alongoldenberg/steam-reviews")
                 embeds_steam = np.array(ds_steam['train']['embed'])
                 pickle.dump(embeds_steam, f)
+    '''

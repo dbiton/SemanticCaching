@@ -6,6 +6,8 @@ import numpy as np
 from scipy.spatial import distance_matrix
 import faiss
 
+from estimate_frequency import calculate_perplexity, calculate_surprisal
+
 
 class Cache:
     def __init__(self, same_embed_distance: float):
@@ -18,14 +20,28 @@ class Cache:
         self.capacity = capacity
         self.index = index
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         raise NotImplementedError("virtual method")
 
     def get_closest_stored_embeds(self, embeds, count_nn=1):
         dists, ids = self.index.search(embeds, count_nn)
         dists = np.sqrt(dists)
         return dists, ids
-
+    
+    def get_in_range_stored_embeds(self, embeds, radius):
+        radius_squared = radius ** 2
+        lims, dist2, ids = self.index.range_search(embeds, radius_squared)
+        dists = np.sqrt(dist2)
+        formatted_dists = []
+        formatted_ids = []
+        start_index = 0
+        for lim in lims[1:]:
+            end_index = lim
+            formatted_dists.append(dists[start_index:end_index])
+            formatted_ids.append(ids[start_index:end_index])
+            start_index = end_index
+        return np.array(formatted_dists, dtype=object), np.array(formatted_ids, dtype=object)
+    
     def size(self):
         return len(self.items)
 
@@ -37,7 +53,7 @@ class Dummy(Cache):
     def initialize(self, capacity: int, index):
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         shape = (len(embeds),)
         return np.zeros(shape, dtype=bool), embeds_ids
 
@@ -51,7 +67,7 @@ class RR(Cache):
         self.items = []
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         assert(len(embeds) < self.capacity)
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
@@ -76,7 +92,7 @@ class LFU(Cache):
         self.items = {}
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
@@ -108,6 +124,85 @@ class LFU(Cache):
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
+class Perplexity(Cache):
+    def __init__(self, same_embed_distance):
+        super().__init__(same_embed_distance)
+
+    def initialize(self, capacity: int, index):
+        self.items = {}
+        super().initialize(capacity, index)
+
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.count_nonzero(mask, axis=1)
+        evicted_items = []
+        additions_embeds = []
+        additions_ids = []
+        count_remove = max(0, (len(embeds) + self.size()) - self.capacity)
+
+        needed_space = len(embeds)
+        current_size = self.size()
+        count_remove = max(0, (current_size + needed_space) - self.capacity)
+        if count_remove > 0:
+            least_used = heapq.nsmallest(count_remove, self.items.items(), key=lambda x: x[1])
+            for embed_id, _ in least_used:
+                del self.items[embed_id]
+                evicted_items.append(embed_id)
+
+        for embed_id, embed, text in zip(embeds_ids, embeds, texts):
+            self.items[embed_id] = -calculate_surprisal(text)
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
+        if additions_ids:
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        return cache_hits, evicted_items
+
+class SphereQueryLFU(Cache):
+    def __init__(self, same_embed_distance):
+        super().__init__(same_embed_distance)
+
+    def initialize(self, capacity: int, index):
+        # Use a dict mapping embed_id -> frequency (access count)
+        self.items = {}
+        super().initialize(capacity, index)
+    
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        closest_dists, closest_ids = self.get_in_range_stored_embeds(embeds, self.same_embed_distance)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.count_nonzero(mask, axis=1)
+        evicted_items = []
+        additions_embeds = []
+        additions_ids = []
+        count_remove = max(0, (len(embeds) + self.size()) - self.capacity)
+        for i_embed, i_nn in zip(*cache_hits_indices):
+            embed_count_hits = len(closest_ids[i_embed])
+            cand = closest_ids[i_embed][i_nn]
+            self.items[cand] += 1 / embed_count_hits
+
+        needed_space = len(embeds)
+        current_size = self.size()
+        count_remove = max(0, (current_size + needed_space) - self.capacity)
+        if count_remove > 0:
+            least_used = heapq.nsmallest(count_remove, self.items.items(), key=lambda x: x[1])
+            for embed_id, _ in least_used:
+                del self.items[embed_id]
+                evicted_items.append(embed_id)
+
+        for embed_id, embed in zip(embeds_ids, embeds):
+            self.items[embed_id] = 0
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
+        if additions_ids:
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        return cache_hits, evicted_items
+
 class DistanceLFU(Cache):
     def __init__(self, same_embed_distance):
         super().__init__(same_embed_distance)
@@ -116,7 +211,7 @@ class DistanceLFU(Cache):
         self.items = {}
         super().initialize(capacity, index)
     
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
@@ -159,7 +254,7 @@ class DynamicAgingLFU(Cache):
         embed_id, (hit_score, last_epoch) = items_entry
         return hit_score / (self.epoch - last_epoch + 1)
     
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
@@ -212,7 +307,7 @@ class PeriodicAgingLFU(Cache):
         self.time_since_aging = 0  # might be bad if epoch can increase indefinitely
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
@@ -253,7 +348,7 @@ class LRU(Cache):
         self.items = OrderedDict()
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
@@ -286,7 +381,7 @@ class RAP(Cache):
         self.items = {}
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
@@ -327,7 +422,7 @@ class FixedRadius(Cache):
         self.items = {}
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
@@ -397,7 +492,7 @@ class PCA(Cache):
         self.items = {}
         super().initialize(capacity, index)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         self.train_counter += len(embeds)
         if self.train_counter >= self.capacity:
             self.train_counter = 0
@@ -429,69 +524,159 @@ class PCA(Cache):
                 self.items[embed_id] = cluster_id
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
-class TinyLFU(Cache):
-    def __init__(self, same_embed_distance):
-        super().__init__(same_embed_distance)
 
-    def decay_frequencies(self):
-        #print("decay")
-        evicted_items = []
-        self.sample_counter *= self.decay_factor
-        for key in list(self.freq_sketch.keys()):
-            self.freq_sketch[key] = int(self.freq_sketch[key] * self.decay_factor)
-            if self.freq_sketch[key] == 0:
-                del self.freq_sketch[key]
-                evicted_items.append(key)
-        return evicted_items
+class BetterTinyLFU(Cache):
+    def __init__(self, same_embed_distance, window_ratio=16):
+        super().__init__(same_embed_distance)
+        self.window_ratio = window_ratio
     
     def initialize(self, capacity: int, index):
         self.decay_factor = 0.5
-        self.sample_counter = 0
-        self.sample_size = int(10 * capacity)
+        self.sample_size = int(self.window_ratio * capacity)
         self.freq_sketch = defaultdict(int)
         self.capacity = capacity
         self.index = index
+        self.index_freq = faiss.IndexIDMap2(faiss.IndexFlatL2(index.d))
         self.items = OrderedDict()
 
-    def request(self, embeds, embeds_ids, count_nn=1):
-        closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
+    def decay_frequencies(self):
+        evicted_items = []
+        for key in list(self.freq_sketch.keys()):
+            self.freq_sketch[key] = self.freq_sketch[key] * self.decay_factor
+            if self.freq_sketch[key] < 1:
+                del self.freq_sketch[key]
+                evicted_items.append(key)
+        self.index_freq.remove_ids(np.array(evicted_items))
+        return evicted_items
+
+    def get_in_range_freq_embeds(self, embeds, radius):
+        radius_squared = radius ** 2
+        lims, dist2, ids = self.index_freq.range_search(embeds, radius_squared)
+        dists = np.sqrt(dist2)
+        formatted_dists = []
+        formatted_ids = []
+        start_index = 0
+        for lim in lims[1:]:
+            end_index = lim
+            formatted_dists.append(dists[start_index:end_index])
+            formatted_ids.append(ids[start_index:end_index])
+            start_index = end_index
+        return np.array(formatted_dists, dtype=object), np.array(formatted_ids, dtype=object)
+    
+    def update_frequencies(self, embeds, embeds_ids):
+        _, closest_ids = self.get_in_range_freq_embeds(embeds, self.same_embed_distance)
+        embed_frequencies = []
+        for embed_id, embed_closest_ids in zip(embeds_ids, closest_ids):
+            freq = 0
+            for embed_neigh_id in embed_closest_ids:
+                embed_count_hits = len(embed_closest_ids)
+                new_freq = min(self.freq_sketch[embed_neigh_id] + 1 / embed_count_hits, self.window_ratio)
+                self.freq_sketch[embed_neigh_id] = new_freq
+                self.items.move_to_end(embed_neigh_id)
+                freq += self.freq_sketch[embed_neigh_id]
+            embed_frequencies.append(freq)
+        return embed_frequencies
+    
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        closest_dists, closest_ids = self.get_in_range_stored_embeds(embeds, self.same_embed_distance)
         mask = closest_dists < self.same_embed_distance
-        cache_hits_indices = np.where(mask)
         cache_hits = np.count_nonzero(mask, axis=1)
         removals = []
-        rejects = []
         additions_embeds = []
         additions_ids = []
-        cache_hits_embeds_ids = [closest_ids[i][i_nn] for i, i_nn in zip(*cache_hits_indices)] + embeds_ids
-        cache_hits_embeds = [None for _ in range(len(cache_hits_indices[0]))] + list(embeds)
-        for embed_id, embed in zip(cache_hits_embeds_ids, cache_hits_embeds):
-            self.sample_counter += 1
-            if self.sample_counter >= self.sample_size:
-                removals += self.decay_frequencies()
-            self.freq_sketch[embed_id] += 1
-            if embed_id in self.items:
-                self.items.move_to_end(embed_id)
-            elif self.size() <= self.capacity:
+        embed_frequencies = self.update_frequencies(embeds, embeds_ids)
+        
+        for embed_id, embed, embed_freq, embed_hits in zip(embeds_ids, embeds, embed_frequencies, cache_hits):
+            if self.size() <= self.capacity:
                 self.items[embed_id] = None
                 additions_ids.append(embed_id)
                 additions_embeds.append(embed)
-            else:
+            elif embed_hits == 0:
                 victim_embed_id, _ = next(iter(self.items.items()))
                 victim_freq = self.freq_sketch[victim_embed_id]
-                embed_freq = self.freq_sketch[embed_id]
-                if embed_freq >= victim_freq:
+                if embed_freq > victim_freq:
                     self.items.popitem(last=False)
                     removals.append(victim_embed_id)
                     self.items[embed_id] = None
                     additions_ids.append(embed_id)
                     additions_embeds.append(embed)
                 else:
-                    rejects.append(embed_id)
+                    removals.append(embed_id)
+        
+        while len(self.freq_sketch) >= self.sample_size:
+            removals += self.decay_frequencies()
+        
         if removals:
-            #print("remove", removals)
             self.index.remove_ids(np.array(removals))
         if additions_ids:
-            #print("add", additions_ids)
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
 
-        return cache_hits, removals + rejects
+        return cache_hits, removals
+    
+class TinyLFU(Cache):
+    def __init__(self, same_embed_distance,  window_ratio=16):
+        super().__init__(same_embed_distance)
+        self.window_ratio =  window_ratio
+
+    def decay_frequencies(self):
+        evicted_items = []
+        for key in list(self.freq_sketch.keys()):
+            self.freq_sketch[key] *= self.decay_factor
+            if self.freq_sketch[key] < 1:
+                del self.freq_sketch[key]
+                evicted_items.append(key)
+        return evicted_items
+    
+    def initialize(self, capacity: int, index):
+        self.decay_factor = 0.5
+        self.sample_size = int(self.window_ratio * capacity)
+        self.freq_sketch = defaultdict(int)
+        self.capacity = capacity
+        self.index = index
+        self.items = OrderedDict()
+
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        closest_dists, closest_ids = self.get_in_range_stored_embeds(embeds, self.same_embed_distance)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits = np.count_nonzero(mask, axis=1)
+        removals = []
+        additions_embeds = []
+        additions_ids = []
+        
+        embed_frequencies = []
+        for embed_id, embed_closest_ids in zip(embeds_ids, closest_ids):
+            freq = 0
+            for embed_neigh_id in embed_closest_ids:
+                count_neighs = len(embed_closest_ids)
+                new_freq = min(self.freq_sketch[embed_neigh_id] + 1 / count_neighs, self.window_ratio)
+                self.freq_sketch[embed_neigh_id] = new_freq
+                self.items.move_to_end(embed_neigh_id)
+                freq += self.freq_sketch[embed_neigh_id]
+            embed_frequencies.append(freq)
+
+        for embed_id, embed, embed_freq, embed_hits in zip(embeds_ids, embeds, embed_frequencies, cache_hits):
+            if self.size() <= self.capacity:
+                self.items[embed_id] = None
+                additions_ids.append(embed_id)
+                additions_embeds.append(embed)
+            elif embed_hits == 0:
+                victim_embed_id, _ = next(iter(self.items.items()))
+                victim_freq = self.freq_sketch[victim_embed_id]
+                if embed_freq > victim_freq:
+                    self.items.popitem(last=False)
+                    removals.append(victim_embed_id)
+                    self.items[embed_id] = None
+                    additions_ids.append(embed_id)
+                    additions_embeds.append(embed)
+                else:
+                    removals.append(embed_id)
+        
+        while len(self.freq_sketch) >= self.sample_size:
+            removals += self.decay_frequencies()
+        
+        if removals:
+            self.index.remove_ids(np.array(removals))
+        if additions_ids:
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+
+        return cache_hits, removals

@@ -15,16 +15,19 @@ from sentence_transformers import SentenceTransformer
 import tqdm
 from cache import *
 from OPT import FreqOPT, RelaxedLearnedOPT, RelaxedOPT, OPT
+from lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
 from reduce_dim import reduce_dim
 
 dataset_filenames = {
-    "Bing": "datasets/embeds_bing.pkl",
-    "StackOverflow": "datasets/embeds_so.pkl",
-    "WildChat": "datasets/embeds_chat.pkl",
-    "Steam": "datasets/embeds_steam.pkl",
+    "Bing": "datasets_text/embeds_bing.pkl",
+    "StackOverflow": "datasets_text/embeds_so.pkl",
+    "ComQA": "datasets_text/embeds_ComQA.pkl",
+    "WildChat": "datasets_text/embeds_chat.pkl",
+    #"Steam": "datasets/embeds_steam.pkl",
 }
+
 has_gpu = False
-NUM_PROCS = 2
+NUM_PROCS = 3
 
 def plot(dataset_name, results):
     for prop_name, prop_results in results.items():
@@ -69,7 +72,9 @@ def process(args):
     cache_hits = 0
     t0 = time.time()
     for batch_embeds, i_embeds in yield_batches(embeds, batch_size):
-        iter_cache_hits, evicted_embeds_ids = cache.request(batch_embeds, i_embeds, count_nn)
+        embeds_texts = [v for (_, v) in batch_embeds]
+        embeds_embeds = np.array([v for (v, _) in batch_embeds])
+        iter_cache_hits, evicted_embeds_ids = cache.request(embeds_embeds, i_embeds, count_nn, embeds_texts)
         cache_hits += np.count_nonzero(iter_cache_hits)
         if pbar is not None: pbar.update(1)
     iter_results = {
@@ -115,23 +120,29 @@ def process_layered(args):
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 10000
+    num_samples = 1000
     MAX_CACHE_SIZE = 0.1
+    COUNT_STEPS = 10
     dim = 384
     same_embed_distance = 0.5
-    for dataset_name, embeds in load_embeds():
-        embeds = reduce_dim(embeds, dim)
-        print(f"loaded {dataset_name}...")
-        embeds = embeds[:num_samples]
+    for dataset_name, data in load_embeds():
+        print(f"loaded {dataset_name} with {len(data['embeds'])} examples...")
+        preps = data['text'][:num_samples]
+        embeds = list(zip(data['embeds'][:num_samples], preps))
         print("loaded!")
-        similar_embed_distance = 1.0
         caches = {
-            "Freq": FreqOPT(same_embed_distance, dim=dim),
+            "Perplexity": Surprisal(same_embed_distance),
+            #"Freq": FreqOPT(same_embed_distance, dim=dim),
             #"RL_OPT": RelaxedLearnedOPT(same_embed_distance, dim=dim),
             #"R_OPT": RelaxedOPT(same_embed_distance, embeds),
-            #"OPT": OPT(same_embed_distance, embeds),
+            # "OPT": OPT(same_embed_distance, embeds),
+            #"BetterTinyLFU": BetterTinyLFU(same_embed_distance),
             #"TinyLFU": TinyLFU(same_embed_distance),
             #"RAP": RAP(same_embed_distance),
+            #"HillClimbingLRFU": HillClimbingLRFU(same_embed_distance, .1, num_samples // 25),
+            #"LRFU.1": LRFU(same_embed_distance, .1),
+            #"LRFU.01": LRFU(same_embed_distance, .01),
+            #"LRFU1.": LRFU(same_embed_distance, 1),
             "LRU": LRU(same_embed_distance),
             #"PCA": PCA(same_embed_distance),
             #"Radius": FixedRadius(same_embed_distance, similar_embed_distance),
@@ -139,12 +150,12 @@ def main():
             #"RR": RR(same_embed_distance),
             #"DistanceLFU": DistanceLFU(same_embed_distance),
             "LFU": LFU(same_embed_distance),
+            #"SphereLFU": SphereQueryLFU(same_embed_distance),
             #"DALFU": PeriodicAgingLFU(same_embed_distance, aging_interval=720, aging_factor=0.5),
         }
 
         results = {}
         args = []
-        COUNT_STEPS = 10
         for cache_name, cache in caches.items():
             step_size = int(num_samples * MAX_CACHE_SIZE // COUNT_STEPS)
             for cache_size in range(step_size, int(num_samples * MAX_CACHE_SIZE), step_size):
@@ -154,12 +165,10 @@ def main():
             pbar = tqdm.tqdm(total=2*len(args), desc=f"Processing {dataset_name} with {num_batches} batches")
             args = [(None, *arg) for arg in args]
             with ProcessPoolExecutor(NUM_PROCS) as executor:
-                # raw_results = chain(executor.map(process_layered, args), executor.map(process, args))
                 raw_results = executor.map(process, args)
         else:
             pbar = tqdm.tqdm(total=2*num_batches, desc=f"Processing {dataset_name} with {num_batches} batches")
             args = [(pbar, *arg) for arg in args]
-            # raw_results = chain(map(process_layered, args), map(process, args))
             raw_results = map(process, args)
             
         for iter_results in raw_results:
