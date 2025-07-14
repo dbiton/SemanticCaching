@@ -17,17 +17,21 @@ from cache import *
 from OPT import FreqOPT, RelaxedLearnedOPT, RelaxedOPT, OPT
 from lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
 from reduce_dim import reduce_dim
+from surprisal_reg_cache import SurprisalReg
 
 dataset_filenames = {
+    "persona": "datasets_text/embeds_persona.pkl",
+    "quora": "datasets_text/embeds_quora.pkl",
+    "OAsst": "datasets_text/embeds_oasst.pkl",
+    "WildChat": "datasets_text/embeds_chat.pkl",
     "Bing": "datasets_text/embeds_bing.pkl",
     "StackOverflow": "datasets_text/embeds_so.pkl",
     "ComQA": "datasets_text/embeds_ComQA.pkl",
-    "WildChat": "datasets_text/embeds_chat.pkl",
-    #"Steam": "datasets/embeds_steam.pkl",
+    # "Steam": "datasets/embeds_steam.pkl",
 }
 
 has_gpu = False
-NUM_PROCS = 3
+NUM_PROCS = 4
 
 def plot(dataset_name, results):
     for prop_name, prop_results in results.items():
@@ -120,26 +124,32 @@ def process_layered(args):
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 1000
+    num_samples = 15000
     MAX_CACHE_SIZE = 0.1
     COUNT_STEPS = 10
     dim = 384
     same_embed_distance = 0.5
     for dataset_name, data in load_embeds():
         print(f"loaded {dataset_name} with {len(data['embeds'])} examples...")
-        preps = data['text'][:num_samples]
-        embeds = list(zip(data['embeds'][:num_samples], preps))
+        indices = random.sample(range(len(data['embeds'])), min(num_samples, len(data['embeds'])))
+        preps = [data['text'][i] for i in indices]
+        embeds_actual = reduce_dim(np.array([data['embeds'][i] for i in indices]), dim)
+        embeds = list(zip(embeds_actual, preps))
         print("loaded!")
         caches = {
-            "Perplexity": Surprisal(same_embed_distance),
+            "Surprisal": Surprisal(same_embed_distance),
+            # "HillClimbingLRFU": HillClimbingLRFU(same_embed_distance, .1, num_samples // 25),
+            # "SurprisalReg": SurprisalReg(same_embed_distance),
+            #"CountChars": CountChars(same_embed_distance),
+            #"CountWords": CountWords(same_embed_distance),
+            # "HillClimbingLRFU": HillClimbingLRFU(same_embed_distance),
             #"Freq": FreqOPT(same_embed_distance, dim=dim),
-            #"RL_OPT": RelaxedLearnedOPT(same_embed_distance, dim=dim),
-            #"R_OPT": RelaxedOPT(same_embed_distance, embeds),
-            # "OPT": OPT(same_embed_distance, embeds),
+            "RL_OPT": RelaxedLearnedOPT(same_embed_distance, dim=dim),
+            "R_OPT": RelaxedOPT(same_embed_distance, embeds_actual),
+            "OPT": OPT(same_embed_distance, embeds_actual),
             #"BetterTinyLFU": BetterTinyLFU(same_embed_distance),
             #"TinyLFU": TinyLFU(same_embed_distance),
             #"RAP": RAP(same_embed_distance),
-            #"HillClimbingLRFU": HillClimbingLRFU(same_embed_distance, .1, num_samples // 25),
             #"LRFU.1": LRFU(same_embed_distance, .1),
             #"LRFU.01": LRFU(same_embed_distance, .01),
             #"LRFU1.": LRFU(same_embed_distance, 1),
@@ -162,12 +172,12 @@ def main():
                 args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name, batch_size, count_nn))
         num_batches = sum([len(embeds)/batch_size for _, _, _, embeds, _, batch_size, _ in args])
         if NUM_PROCS > 1:
-            pbar = tqdm.tqdm(total=2*len(args), desc=f"Processing {dataset_name} with {num_batches} batches")
+            pbar = tqdm.tqdm(total=len(args), desc=f"Processing {dataset_name} with {num_batches} batches")
             args = [(None, *arg) for arg in args]
             with ProcessPoolExecutor(NUM_PROCS) as executor:
                 raw_results = executor.map(process, args)
         else:
-            pbar = tqdm.tqdm(total=2*num_batches, desc=f"Processing {dataset_name} with {num_batches} batches")
+            pbar = tqdm.tqdm(total=num_batches, desc=f"Processing {dataset_name} with {num_batches} batches")
             args = [(pbar, *arg) for arg in args]
             raw_results = map(process, args)
             

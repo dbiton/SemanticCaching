@@ -6,7 +6,7 @@ import numpy as np
 from scipy.spatial import distance_matrix
 import faiss
 
-from estimate_frequency import calculate_perplexity, calculate_surprisal
+from surprisal.estimate_frequency import calculate_perplexity, calculate_surprisal, calculate_surprisal_gpt
 
 
 class Cache:
@@ -124,18 +124,20 @@ class LFU(Cache):
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
-class Perplexity(Cache):
+class SimpleCache(Cache):
     def __init__(self, same_embed_distance):
         super().__init__(same_embed_distance)
 
+    def get_score(self, embed, embed_id: int, embed_text: str) -> float:
+        return 0
+    
     def initialize(self, capacity: int, index):
         self.items = {}
         super().initialize(capacity, index)
 
     def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
-        closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
-        cache_hits_indices = np.where(mask)
         cache_hits = np.count_nonzero(mask, axis=1)
         evicted_items = []
         additions_embeds = []
@@ -152,7 +154,7 @@ class Perplexity(Cache):
                 evicted_items.append(embed_id)
 
         for embed_id, embed, text in zip(embeds_ids, embeds, texts):
-            self.items[embed_id] = -calculate_surprisal(text)
+            self.items[embed_id] = self.get_score(embed, embed_id, text)
             additions_embeds.append(embed)
             additions_ids.append(embed_id)
         if evicted_items:
@@ -161,6 +163,18 @@ class Perplexity(Cache):
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
+class CountChars(SimpleCache):
+    def get_score(self, embed, embed_id, embed_text):
+        return -len(embed_text)
+    
+class CountWords(SimpleCache):
+    def get_score(self, embed, embed_id, embed_text):
+        return -len(embed_text.split())
+    
+class Surprisal(SimpleCache):
+    def get_score(self, embed, embed_id, embed_text):
+        return -calculate_surprisal(embed_text)
+    
 class SphereQueryLFU(Cache):
     def __init__(self, same_embed_distance):
         super().__init__(same_embed_distance)

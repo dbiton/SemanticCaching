@@ -8,6 +8,7 @@ import lightgbm as lgb
 import random
 
 from freq_reg import FreqReg
+from surprisal.estimate_frequency import calculate_surprisal
 
 class OPT(Cache):
 
@@ -44,7 +45,7 @@ class OPT(Cache):
             next_hits[embed_id] = next_hit
         return next_hits
     
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
@@ -117,7 +118,7 @@ class RelaxedOPT(Cache):
             next_hits[embed_id] = next_hit
         return next_hits
     
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
@@ -167,14 +168,15 @@ class RLB_Reg():
         self.training_data = {}
         self.index_train = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
         self.reg = None
+        self.train_counter = 0
         self.deltas_count = deltas_count
         self.same_embed_distance = same_embed_distance
         self.labeled_count = 0
         self.belady_boundary_coe = belady_boundary_coe
         self.dim = dim
     
-    def is_trained(self):
-        return self.reg is not None
+    def get_train_counter(self):
+        return self.train_counter
     
     def get_belady_boundary(self):
         return self.train_capacity * self.belady_boundary_coe
@@ -183,6 +185,7 @@ class RLB_Reg():
         return np.log2(self.get_belady_boundary() * 2)
     
     def train(self):
+        self.train_counter += 1
         print("Training...")
         self.reg = lgb.LGBMRegressor()
         data = pd.DataFrame(self.training_data.values())
@@ -211,10 +214,10 @@ class RLB_Reg():
                 edcs[edc_index] = 1 + edcs[edc_index] * decay_factor
         return edcs
     
-    def record_for_training(self, embeds_ids, embeds):
+    def record_for_training(self, embeds_ids, embeds, embeds_texts):
         if self.labeled_count >= self.train_capacity:
             self.train()
-        features, cache_hits = self.get_features(embeds_ids, embeds)
+        features, cache_hits = self.get_features(embeds_ids, embeds, embeds_texts)
         for embed_id, embed_cache_hits in cache_hits.items():
             self.training_data[embed_id] = [features[embed_id], None]
             for cache_hit_embed_id in embed_cache_hits:
@@ -224,19 +227,19 @@ class RLB_Reg():
                     entry[1] = np.log2(embed_id - cache_hit_embed_id)
         self.index_train.add_with_ids(embeds, np.array(embeds_ids))
     
-    def predict(self, embeds_ids, embeds):
-        features, _ = self.get_features(embeds_ids, embeds)
+    def predict(self, embeds_ids, embeds, embeds_texts):
+        features, _ = self.get_features(embeds_ids, embeds, embeds_texts)
         X = np.array(list(features.values()))
         return self.reg.predict(X)
     
-    def get_features(self, embeds_ids, embeds):
+    def get_features(self, embeds_ids, embeds, embeds_text):
         dists, ids = self.index_train.search(embeds, self.deltas_count)
         dists = np.sqrt(dists)
         
         features = {}
         cache_hits = {}
 
-        for i, embed_id in enumerate(embeds_ids):
+        for i, (embed_id, embed_text) in enumerate(zip(embeds_ids, embeds_text)):
             embed_dists = dists[i]
             embed_ids = ids[i]
 
@@ -260,6 +263,9 @@ class RLB_Reg():
             edc = self.calc_edc(deltas, self.deltas_count)
 
             curr_features = np.hstack((
+                len(embed_text),
+                len(embed_text.split()),
+                calculate_surprisal(embed_text),
                 np.mean(reasonable_dists) if reasonable_dists.size else -1,
                 np.std(reasonable_dists) if reasonable_dists.size else -1,
                 np.mean(hits_dists) if hits_dists.size else -1,
@@ -281,11 +287,12 @@ class RelaxedLearnedOPT(Cache):
         self.dim = dim
         self.belady_boundary_coe = belady_boundary_coe
         self.deltas_count = deltas_count
-        self.train_capacity_ratio = train_capacity_ratio 
+        self.train_capacity_ratio = train_capacity_ratio
 
     def initialize(self, capacity: int, index):
         self.train_counter = 0
         self.items = []
+        self.items_texts = {}
         self.labeled_count = 0
         self.belady_boundary = np.inf
         self.curr_embed_id = 0
@@ -295,25 +302,30 @@ class RelaxedLearnedOPT(Cache):
         self.index_train = faiss.IndexIDMap2(faiss.IndexFlatL2(self.dim))
         super().initialize(capacity, index)    
     
-    def predict(self, embeds_ids, embeds):
-        y = self.reg.predict(np.array(embeds_ids), np.array(embeds))
+    def predict(self, embeds_ids, embeds, embeds_text):
+        y = self.reg.predict(np.array(embeds_ids), np.array(embeds), embeds_text)
         return 2 ** y + embeds_ids
     
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
-        self.reg.record_for_training(embeds_ids, embeds)
+        self.reg.record_for_training(embeds_ids, embeds, texts)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
         rejected_items = []
         additions = []
         
-        if self.reg.is_trained():
+        # dummy
+        for embed_id, embed_text in zip(embeds_ids, texts):
+            self.items_texts[embed_id] = embed_text
+        
+        if self.reg.get_train_counter() > 0:
             if self.reg.get_train_counter() < self.train_counter:
                 self.train_counter += 1
                 _, all_embeds_ids, all_embeds = zip(*self.items)
-                all_next_hits = self.predict(all_embeds_ids, all_embeds)
+                all_texts = [self.items_texts[eid] for eid in all_embeds_ids]
+                all_next_hits = self.predict(all_embeds_ids, all_embeds, all_texts)
                 self.items = sorted(list(zip(all_next_hits, all_embeds_ids, all_embeds)))
-            next_hits = self.predict(embeds_ids, embeds)
+            next_hits = self.predict(embeds_ids, embeds, texts)
             entries = sorted(list(zip(next_hits, embeds_ids, embeds)))
         else:
             entries = list(zip(-np.array(embeds_ids), embeds_ids, embeds))
@@ -363,7 +375,7 @@ class FreqOPT(Cache):
     def predict(self, embeds_ids, embeds):
         return self.reg.predict(np.array(embeds_ids), np.array(embeds))
     
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         self.reg.record_for_training(embeds_ids, embeds)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
