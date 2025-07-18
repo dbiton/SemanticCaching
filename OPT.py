@@ -9,6 +9,8 @@ import random
 
 from freq_reg import FreqReg
 from surprisal.estimate_frequency import calculate_surprisal
+import re
+
 
 class OPT(Cache):
 
@@ -80,10 +82,11 @@ class OPT(Cache):
 
 
 class RelaxedOPT(Cache):
+
     def __init__(self, same_embed_distance, embeds, belady_boundary_coe=2.0):
         super().__init__(same_embed_distance)
         self.embeds_covers = self.create_embeds_covers(embeds, same_embed_distance)
-        self.belady_boundary_coe=belady_boundary_coe
+        self.belady_boundary_coe = belady_boundary_coe
 
     def get_belady_boundary(self):
         return self.capacity * self.belady_boundary_coe
@@ -153,6 +156,7 @@ class RelaxedOPT(Cache):
             self.index.remove_ids(np.array(evicted_items))
         return cache_hits, evicted_items + rejected_items
 
+
 def pad_array(arr, N, v):
     current_length = arr.shape[0]
     if current_length < N:
@@ -162,8 +166,10 @@ def pad_array(arr, N, v):
         return arr[-N:]
     return arr
 
+
 class RLB_Reg():
-    def __init__(self, train_capacity, deltas_count = 8, same_embed_distance = 0.5, belady_boundary_coe = 2, dim=384):
+
+    def __init__(self, train_capacity, deltas_count=8, same_embed_distance=0.5, belady_boundary_coe=2, dim=384):
         self.train_capacity = train_capacity
         self.training_data = {}
         self.index_train = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
@@ -182,18 +188,7 @@ class RLB_Reg():
         return self.train_capacity * self.belady_boundary_coe
     
     def get_default_label(self):
-        return np.log2(self.get_belady_boundary() * 2)
-    
-    def train(self):
-        self.train_counter += 1
-        print("Training...")
-        self.reg = lgb.LGBMRegressor()
-        data = pd.DataFrame(self.training_data.values())
-        X = np.array(data[0].tolist()).astype(np.float32)
-        default_label = self.get_default_label()
-        y = data[1].fillna(default_label).astype(np.float32).to_list()
-        self.reg.fit(X, y)
-        self.remove_labeled_from_training()
+        return np.log2(self.get_belady_boundary() * 4)
     
     def remove_labeled_from_training(self):
         removed_embeds_ids = [eid for (eid, entry) in self.training_data.items() if entry[1] is not None]
@@ -210,7 +205,7 @@ class RLB_Reg():
                 break
             for edc_index in range(edc_count):
                 decay_const = pow(2, 9 + edc_index + 1)
-                decay_factor = pow(2, - delta / decay_const)
+                decay_factor = pow(2, -delta / decay_const)
                 edcs[edc_index] = 1 + edcs[edc_index] * decay_factor
         return edcs
     
@@ -260,19 +255,30 @@ class RLB_Reg():
             else:
                 deltas = np.array([], dtype=int)
             deltas = pad_array(deltas, self.deltas_count, -1)
-            edc = self.calc_edc(deltas, self.deltas_count)
 
+            count_chars = len(embed_text)
+            count_whitespace = sum(ch.isspace() for ch in embed_text)
+            words = embed_text.split()
+            count_words = len(words)
+            count_vocab = len(set(words))
+            count_sents = len(re.split(r"[.!?;]+", embed_text))
+            mean_word_len = sum([len(word) for word in words], 0) / len(words) if len(words) > 0 else 0
+            
             curr_features = np.hstack((
-                len(embed_text),
-                len(embed_text.split()),
+                deltas,
+                # mean_word_len,
+                count_sents,
+                count_vocab,
+                count_words,
+                count_whitespace,
+                count_chars,
                 calculate_surprisal(embed_text),
                 np.mean(reasonable_dists) if reasonable_dists.size else -1,
                 np.std(reasonable_dists) if reasonable_dists.size else -1,
                 np.mean(hits_dists) if hits_dists.size else -1,
                 np.std(hits_dists) if hits_dists.size else -1,
-                deltas,
-                edc,
                 hits_ids.size,
+                reasonable_dists.size,
             ))
 
             features[embed_id] = np.nan_to_num(curr_features, nan=-1)
@@ -280,9 +286,37 @@ class RLB_Reg():
 
         return features, cache_hits
     
+    def train(self):
+        self.train_counter += 1
+        print("Training...")
+        self.reg = lgb.LGBMRegressor(max_depth=6, n_estimators=100)
+        data = pd.DataFrame(self.training_data.values())
+        data = data.dropna()
+        X = np.array(data[0].tolist()).astype(np.float32)
+        # should do nothing if we only use tagged data
+        default_label = self.get_default_label()
+        y = data[1].fillna(default_label).astype(np.float32).to_list()
+        self.reg.fit(X, y)
+        
+        '''FEATURE_NAMES = [
+        "mean_word_len", "count_sents", "count_vocab", "count_words",
+        "count_ws", "count_chars", "surprisal",
+        "mean_reasonable_dist", "std_reasonable_dist",
+        "mean_hit_dist", "std_hit_dist",
+        *[f"delta_{k}" for k in range(8)],
+        *[f"edc_{k}" for k in range(8)], "num_hits", "num_dists"
+        ]
+        
+        imp = (pd
+       .DataFrame({"feature": FEATURE_NAMES,
+                   "gain": self.reg.booster_.feature_importance("gain")})
+       .sort_values("gain", ascending=False))
+        # print(imp.head(10).to_string(index=False))'''
+        self.remove_labeled_from_training()
     
 class RelaxedLearnedOPT(Cache):
-    def __init__(self, same_embed_distance, deltas_count=4, train_capacity_ratio=1.0, belady_boundary_coe = 2.0, dim = 384):
+
+    def __init__(self, same_embed_distance, deltas_count=4, train_capacity_ratio=1.0, belady_boundary_coe=2.0, dim=384):
         super().__init__(same_embed_distance)
         self.dim = dim
         self.belady_boundary_coe = belady_boundary_coe
@@ -330,7 +364,7 @@ class RelaxedLearnedOPT(Cache):
         else:
             entries = list(zip(-np.array(embeds_ids), embeds_ids, embeds))
         
-        for next_hit, embed_id, embed in entries:            
+        for next_hit, embed_id, embed in entries: 
             if self.capacity <= self.size():
                 # remove worst
                 max_hit, max_embed_id, max_embed = self.items[-1]
@@ -352,8 +386,10 @@ class RelaxedLearnedOPT(Cache):
             self.index.remove_ids(np.array(evicted_items))
         return cache_hits, evicted_items + rejected_items
 
+
 class FreqOPT(Cache):
-    def __init__(self, same_embed_distance, deltas_count=4, train_capacity_ratio=1.0, belady_boundary_coe = 2.0, dim = 384):
+
+    def __init__(self, same_embed_distance, deltas_count=4, train_capacity_ratio=1.0, belady_boundary_coe=2.0, dim=384):
         super().__init__(same_embed_distance)
         self.dim = dim
         self.belady_boundary_coe = belady_boundary_coe
