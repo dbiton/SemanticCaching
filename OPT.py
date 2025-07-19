@@ -6,10 +6,12 @@ import numpy as np
 import faiss
 import lightgbm as lgb
 import random
+from scipy import stats
 
 from freq_reg import FreqReg
 from surprisal.estimate_frequency import calculate_surprisal
 import re
+from scipy.stats._stats_py import median_abs_deviation
 
 
 class OPT(Cache):
@@ -188,10 +190,10 @@ class RLB_Reg():
         return self.train_capacity * self.belady_boundary_coe
     
     def get_default_label(self):
-        return np.log2(self.get_belady_boundary() * 4)
+        return np.log2(self.get_belady_boundary())
     
     def remove_labeled_from_training(self):
-        removed_embeds_ids = [eid for (eid, entry) in self.training_data.items() if entry[1] is not None]
+        removed_embeds_ids = [eid for (eid, entry) in self.training_data.items()]# if entry[1] is not None]
         self.training_data = {k: v for (k, v) in self.training_data.items() if k not in removed_embeds_ids}
         self.index_train.remove_ids(np.array(removed_embeds_ids))
         self.labeled_count = 0
@@ -210,7 +212,7 @@ class RLB_Reg():
         return edcs
     
     def record_for_training(self, embeds_ids, embeds, embeds_texts):
-        if self.labeled_count >= self.train_capacity:
+        if len(self.training_data) >= self.train_capacity:# self.labeled_count >= self.train_capacity:
             self.train()
         features, cache_hits = self.get_features(embeds_ids, embeds, embeds_texts)
         for embed_id, embed_cache_hits in cache_hits.items():
@@ -228,7 +230,7 @@ class RLB_Reg():
         return self.reg.predict(X)
     
     def get_features(self, embeds_ids, embeds, embeds_text):
-        dists, ids = self.index_train.search(embeds, self.deltas_count)
+        dists, ids = self.index_train.search(embeds, self.deltas_count + 1)
         dists = np.sqrt(dists)
         
         features = {}
@@ -252,10 +254,11 @@ class RLB_Reg():
             if hits_ids.size > 0:
                 sorted_hits = np.sort(hits_ids)
                 deltas = np.diff(sorted_hits)
+                delta_since_last_hit = embed_id - sorted_hits[-1]
             else:
                 deltas = np.array([], dtype=int)
+                delta_since_last_hit = -1
             deltas = pad_array(deltas, self.deltas_count, -1)
-
             count_chars = len(embed_text)
             count_whitespace = sum(ch.isspace() for ch in embed_text)
             words = embed_text.split()
@@ -263,10 +266,12 @@ class RLB_Reg():
             count_vocab = len(set(words))
             count_sents = len(re.split(r"[.!?;]+", embed_text))
             mean_word_len = sum([len(word) for word in words], 0) / len(words) if len(words) > 0 else 0
-            
+            data_available = len(self.training_data)
             curr_features = np.hstack((
                 deltas,
-                # mean_word_len,
+                delta_since_last_hit,
+                data_available,
+                mean_word_len,
                 count_sents,
                 count_vocab,
                 count_words,
@@ -275,8 +280,14 @@ class RLB_Reg():
                 calculate_surprisal(embed_text),
                 np.mean(reasonable_dists) if reasonable_dists.size else -1,
                 np.std(reasonable_dists) if reasonable_dists.size else -1,
+                stats.median_abs_deviation(reasonable_dists) if reasonable_dists.size else -1,
+                np.quantile(reasonable_dists, 95) if reasonable_dists.size else -1,
+                np.quantile(reasonable_dists, 5) if reasonable_dists.size else -1,
                 np.mean(hits_dists) if hits_dists.size else -1,
                 np.std(hits_dists) if hits_dists.size else -1,
+                stats.median_abs_deviation(hits_dists) if hits_dists.size else -1,
+                np.quantile(hits_dists, 95) if reasonable_dists.size else -1,
+                np.quantile(hits_dists, 5) if reasonable_dists.size else -1,
                 hits_ids.size,
                 reasonable_dists.size,
             ))
@@ -289,9 +300,8 @@ class RLB_Reg():
     def train(self):
         self.train_counter += 1
         print("Training...")
-        self.reg = lgb.LGBMRegressor(max_depth=6, n_estimators=100)
+        self.reg = lgb.LGBMRegressor(max_depth=6, n_estimators=100, num_leaves=31)
         data = pd.DataFrame(self.training_data.values())
-        data = data.dropna()
         X = np.array(data[0].tolist()).astype(np.float32)
         # should do nothing if we only use tagged data
         default_label = self.get_default_label()
@@ -303,15 +313,14 @@ class RLB_Reg():
         "count_ws", "count_chars", "surprisal",
         "mean_reasonable_dist", "std_reasonable_dist",
         "mean_hit_dist", "std_hit_dist",
-        *[f"delta_{k}" for k in range(8)],
+        *[f"delta_{k}" for k in range(0)],
         *[f"edc_{k}" for k in range(8)], "num_hits", "num_dists"
-        ]
+        ]'''
         
         imp = (pd
-       .DataFrame({"feature": FEATURE_NAMES,
-                   "gain": self.reg.booster_.feature_importance("gain")})
+       .DataFrame({"gain": self.reg.booster_.feature_importance("gain")})
        .sort_values("gain", ascending=False))
-        # print(imp.head(10).to_string(index=False))'''
+        print(imp.head(10).to_string(index=False))
         self.remove_labeled_from_training()
     
 class RelaxedLearnedOPT(Cache):

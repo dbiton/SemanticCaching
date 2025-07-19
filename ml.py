@@ -166,14 +166,12 @@ def test_regressor():
                 predict = 2**predict
                 actual = get_next_hits(embeds_covers, i_embeds[0], i_embeds) - i_embeds
                 max_pred = 2 ** reg.get_default_label()
+                actual[actual > max_pred] = max_pred
                 evict_actual += list(actual)
                 evict_predict += list(predict)
-                actual[actual > max_pred] = max_pred
                 #gdrs.append(abs(actual-predict).mean())
                 #print(np.mean(gdrs))
             reg.record_for_training(i_embeds, embeds_embeds, embeds_texts)
-        
-        show(evict_actual, evict_predict)
 
 
 def show(y_true, y_pred):
@@ -191,8 +189,8 @@ def show(y_true, y_pred):
 
 def test_policy():
     DIM = 384
-    DELTAS_COUNT = 8
-    STREAM_SIZE = 200000
+    DELTAS_COUNT = 16
+    STREAM_SIZE = 15000
     CACHE_SIZE = 5000
     BATCH_SIZE = 1
     COUNT_NN = 1
@@ -220,9 +218,9 @@ def test_policy():
                 count_evicts += len(evicted_embeds_ids)
                 next_hits = get_next_hits(embeds_covers, next_i_embed, evicted_embeds_ids) - i_embeds[-1]
                 count_good_evicts += len(np.where(next_hits >= BELADY_BOUNDARY_COE * CACHE_SIZE)[0])
-                print("GDR:", count_good_evicts / count_evicts, count_good_evicts, count_evicts)
-                print("LABELS", cache.reg.labeled_count)
             pbar.update(len(batch_embeds))
+        print("GDR:", count_good_evicts / count_evicts, count_good_evicts, count_evicts)
+        
 
 def test_freq_reg():
     DIM = 384
@@ -255,6 +253,6 @@ def test_freq_reg():
         
     
 if __name__ == "__main__":
-    test_regressor()
+    test_policy()
 
                 
