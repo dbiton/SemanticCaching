@@ -250,13 +250,28 @@ class RLB_Reg():
         
         self.index_train.add_with_ids(embeds, np.array(embeds_ids))
     
-    def predict_tmp(self, embeds_ids, embeds, embeds_texts, actual):
-        X, _ = self.get_features(embeds_ids, embeds, embeds_texts)       
-        log_time_hit_pred = self.reg.predict(X)
-        time_hit_pred = np.expm1(log_time_hit_pred)
-        y = embeds_ids + time_hit_pred 
-        print(np.mean(np.abs(actual - log_time_hit_pred)))
-        return y
+    def predict_tmp(self, embeds_ids, embeds, embeds_texts, actual_log):
+        # 1) feature extraction
+        X, _ = self.get_features(embeds_ids, embeds, embeds_texts)
+        dmat = xgb.DMatrix(X.astype(np.float32))
+
+        # 2) predict in log‑space, then convert to real time
+        log_pred = self.reg.predict(dmat)               # log1p(time_to_hit̂ )
+        t_pred   = np.expm1(log_pred)                   # time_to_hit̂  in original units
+        y_pred   = embeds_ids + t_pred                  # absolute time of next hit
+
+        # 3) diagnostics ────────────────
+        # (i) MAE in log‑space (only where actual is uncensored)
+        mask = np.isfinite(actual_log)
+        if mask.any():
+            log_mae = np.mean(np.abs(actual_log[mask] - log_pred[mask]))
+            print(f"Log‑space MAE (uncensored) : {log_mae:.4f}")
+
+            # (ii) MAE in original units
+            mae_orig = np.mean(np.abs(np.expm1(actual_log[mask]) - t_pred[mask]))
+            print(f"Original‑time MAE          : {mae_orig:.4f}")
+
+        return y_pred
     
     def predict(self, embeds_ids, embeds, embeds_texts):
         X, _ = self.get_features(embeds_ids, embeds, embeds_texts)       
@@ -274,7 +289,7 @@ class RLB_Reg():
         for i, (embed_id, embed_text) in enumerate(zip(embeds_ids, embeds_text)):
             embed_dists = dists[i]
             embed_ids = ids[i]
-            sorted_hits = np.sort([embed_id] + embed_ids)
+            sorted_hits = np.sort([embed_id] + list(embed_ids))
             deltas = np.diff(sorted_hits)
             edc = self.calc_edc(deltas, 4)
             recent_deltas = pad_array(deltas, self.deltas_count, -1)
@@ -305,15 +320,17 @@ class RLB_Reg():
                 # Distance related
                 #np.min(embed_dists) if embed_dists.size else -1,
                 #np.max(embed_dists) if embed_dists.size else -1,
-                ".05 distance": np.quantile(embed_dists, .05) if embed_dists.size else -1,
+                ".25 quantile distance": np.quantile(embed_dists, .25) if embed_dists.size else -1,
                 #np.quantile(embed_dists, .25) if embed_dists.size else -1,
                 #np.quantile(embed_dists, .75) if embed_dists.size else -1,
-                ".95 quantile distance": np.quantile(embed_dists, .95) if embed_dists.size else -1,
+                ".75 quantile distance": np.quantile(embed_dists, .75) if embed_dists.size else -1,
                 "std hit distance": np.std(embed_dists) if embed_dists.size else -1,
             }
             # add delta
             for i, delta in enumerate(recent_deltas):
                 embed_features[f'delta_{i}'] = delta
+            for i, edc in enumerate(edc):
+                embed_features[f'edc_{i}'] = edc
 
             features.append(embed_features)
             cache_hits[embed_id] = embed_ids
@@ -323,53 +340,95 @@ class RLB_Reg():
     
     def train(self):
         self.train_counter += 1
-        #print("Training...")
 
-        # Extract features and labels
-        features_list = []
-        labels_list = []
+        # ---------- 1. gather rows ----------
+        rows          = []
+        lower_bounds  = []
+        upper_bounds  = []
 
-        for features_df, label in self.training_data.values():
-            if label is None:
+        censor_val = np.log1p(self.get_belady_boundary())  # sentinel for “no‑hit”
+
+        for feat_df, lbl in self.training_data.values():
+            if lbl is None:
                 continue
-            features_list.append(features_df)  # each is a 1-row DataFrame
-            labels_list.append(label)
 
-        # Concatenate all features into a single DataFrame
-        X = pd.DataFrame(features_list)
-        y = pd.Series(labels_list, name="target")
-    
-        self.reg = xgb.XGBRegressor(max_depth=4, n_estimators=256, verbosity=0, objective='reg:squarederror')
+            # feat_df is a 1‑row DataFrame → take the row as a Series
+            rows.append(feat_df)
 
-        # Split into train (80%) and test (20%) sets
-        split_index = int(len(X) * 0.95)
-        X_train, X_test = X[:split_index], X[split_index:]
-        y_train, y_test = y[:split_index], y[split_index:]
+            if lbl >= censor_val:            # right‑censored sample
+                lower_bounds.append(lbl)
+                upper_bounds.append(np.inf)
+            else:                            # exact (uncensored) hit‑time
+                lower_bounds.append(lbl)
+                upper_bounds.append(lbl)
 
-        # Train on training set only
-        self.reg.fit(X_train, y_train)
+        if not rows:        # nothing labelled yet
+            return
 
-        # Evaluate on training set
-        preds_train = self.reg.predict(X_train)
-        mse_train = mean_squared_error(y_train, preds_train)
-        mae_train = mean_absolute_error(y_train, preds_train)
-        r2_train = r2_score(y_train, preds_train)
+        # ---------- 2. build feature matrix ----------
+        X_full = pd.DataFrame(rows).astype(np.float32).reset_index(drop=True)
+        lb     = np.asarray(lower_bounds, dtype=np.float32)
+        ub     = np.asarray(upper_bounds, dtype=np.float32)
 
-        print(f"Training MSE: {mse_train:.4f}")
-        print(f"Training MAE: {mae_train:.4f}")
-        print(f"Training R²: {r2_train:.4f}")
+        # ---------- 3. train / test split ----------
+        split_at   = int(0.90 * len(X_full))
+        X_train    = X_full.iloc[:split_at]
+        X_test     = X_full.iloc[split_at:]
+        lb_train   = lb[:split_at]
+        lb_test    = lb[split_at:]
+        ub_train   = ub[:split_at]
+        ub_test    = ub[split_at:]
 
-        # Evaluate on test set
-        preds_test = self.reg.predict(X_test)
-        mse_test = mean_squared_error(y_test, preds_test)
-        mae_test = mean_absolute_error(y_test, preds_test)
-        r2_test = r2_score(y_test, preds_test)
+        # ---------- 4. DMatrix with censoring ----------
+        dtrain = xgb.DMatrix(
+            data=X_train,
+            label_lower_bound=lb_train,
+            label_upper_bound=ub_train
+        )
+        dtest  = xgb.DMatrix(
+            data=X_test,
+            label_lower_bound=lb_test,
+            label_upper_bound=ub_test
+        )
 
-        print(f"Test MSE: {mse_test:.4f}")
-        print(f"Test MAE: {mae_test:.4f}")
-        print(f"Test R²: {r2_test:.4f}")
-        
-        imp = self.reg.get_booster().get_score(importance_type='gain')
+        # ---------- 5. AFT model params ----------
+        params = {
+            "objective":               "survival:aft",
+            "aft_loss_distribution":   "normal",
+            "aft_loss_distribution_scale": 1.0,
+            "max_depth":   4,
+            "learning_rate": 0.05,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "reg_alpha": 1.0,
+            "reg_lambda": 2.0,
+            "verbosity": 0,
+            "seed": 42,
+        }
+
+        # ---------- 6. train ----------
+        self.reg = xgb.train(params, dtrain, num_boost_round=256)
+
+        # ---------- 7. metrics ----------
+        preds_train = self.reg.predict(dtrain)
+        preds_test  = self.reg.predict(dtest)
+
+        def show_metrics(name, y_true, y_pred):
+            mse = mean_squared_error(y_true, y_pred)
+            mae = mean_absolute_error(y_true, y_pred)
+            r2  = r2_score(y_true,  y_pred)
+            print(f"{name:8s} | MSE {mse:.4f}  MAE {mae:.4f}  R² {r2:.4f}")
+
+        show_metrics("Train", lb_train, preds_train)
+        show_metrics("Test",  lb_test,  preds_test)
+
+        # ---------- 8. feature importance ----------
+        print("\nTop features (gain):")
+        for k, v in sorted(self.reg.get_score(importance_type="gain").items(),
+                        key=lambda kv: kv[1], reverse=True)[:15]:
+            print(f"  {k:25s} {v:.3f}")
+
+        # ---------- 9. housekeeping ----------
         self.remove_labeled_from_training()
 
     
