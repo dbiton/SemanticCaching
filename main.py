@@ -14,7 +14,7 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 import tqdm
 from cache import *
-from OPT import FreqOPT, RelaxedLearnedOPT, RelaxedOPT, OPT, ClusterOPT,\
+from OPT import RelaxedLearnedOPT, RelaxedOPT, OPT, ClusterOPT,\
     ClusterRelaxedOPT
 from lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
 from reduce_dim import reduce_dim
@@ -147,25 +147,26 @@ def main():
             # "HillClimbingLRFU": HillClimbingLRFU(same_embed_distance),
             #"Freq": FreqOPT(same_embed_distance, dim=dim),
             #"RL_OPT": RelaxedLearnedOPT(same_embed_distance, dim=dim),
-            "R_OPT": RelaxedOPT(same_embed_distance, embeds_actual),
-            "OPT": OPT(same_embed_distance, embeds_actual),
-            "ClusterOPT": ClusterOPT(same_embed_distance, embeds_actual),
-            "ClusterRelaxedOPT": ClusterRelaxedOPT(same_embed_distance, embeds_actual),
+            #"R_OPT": RelaxedOPT(same_embed_distance, embeds_actual),
+            #"OPT": OPT(same_embed_distance, embeds_actual),
+            #"ClusterOPT": ClusterOPT(same_embed_distance, embeds_actual),
+            #"ClusterRelaxedOPT": ClusterRelaxedOPT(same_embed_distance, embeds_actual),
             #"BetterTinyLFU": BetterTinyLFU(same_embed_distance),
             #"TinyLFU": TinyLFU(same_embed_distance),
-            #"RAP": RAP(same_embed_distance),
             #"LRFU.1": LRFU(same_embed_distance, .1),
             #"LRFU.01": LRFU(same_embed_distance, .01),
             #"LRFU1.": LRFU(same_embed_distance, 1),
+            "ClusterLFU": ClusterLFU(same_embed_distance),
+            "DALFU": DynamicAgingLFU(same_embed_distance, 32),
+            "DistanceLFU": DistanceLFU(same_embed_distance),
             "LRU": LRU(same_embed_distance),
             #"PCA": PCA(same_embed_distance),
             #"Radius": FixedRadius(same_embed_distance, similar_embed_distance),
             #"Dummy": Dummy(same_embed_distance),
             #"RR": RR(same_embed_distance),
-            #"DistanceLFU": DistanceLFU(same_embed_distance),
+            "RAP": RAP(same_embed_distance),
             "LFU": LFU(same_embed_distance),
-            #"SphereLFU": SphereQueryLFU(same_embed_distance),
-            #"DALFU": PeriodicAgingLFU(same_embed_distance, aging_interval=720, aging_factor=0.5),
+            "SphereLFU": SphereQueryLFU(same_embed_distance),
         }
 
         results = {}
