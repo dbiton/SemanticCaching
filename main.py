@@ -14,19 +14,20 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 import tqdm
 from cache import *
-from OPT import FreqOPT, RelaxedLearnedOPT, RelaxedOPT, OPT
+from OPT import FreqOPT, RelaxedLearnedOPT, RelaxedOPT, OPT, ClusterOPT,\
+    ClusterRelaxedOPT
 from lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
 from reduce_dim import reduce_dim
 from surprisal_reg_cache import SurprisalReg
 
 dataset_filenames = {
-    "persona": "datasets_text/embeds_persona.pkl",
-    "quora": "datasets_text/embeds_quora.pkl",
-    "OAsst": "datasets_text/embeds_oasst.pkl",
     "WildChat": "datasets_text/embeds_chat.pkl",
     "Bing": "datasets_text/embeds_bing.pkl",
     "StackOverflow": "datasets_text/embeds_so.pkl",
     "ComQA": "datasets_text/embeds_ComQA.pkl",
+    "persona": "datasets_text/embeds_persona.pkl",
+    "quora": "datasets_text/embeds_quora.pkl",
+    "OAsst": "datasets_text/embeds_oasst.pkl",
     # "Steam": "datasets/embeds_steam.pkl",
 }
 
@@ -124,11 +125,12 @@ def process_layered(args):
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 15000
+    num_samples = 5000
     MAX_CACHE_SIZE = 0.1
-    COUNT_STEPS = 10
+    COUNT_STEPS = 8
     dim = 384
-    same_embed_distance = 0.5
+    same_embed_distance = .75
+    random.seed(42)
     for dataset_name, data in load_embeds():
         print(f"loaded {dataset_name} with {len(data['embeds'])} examples...")
         indices = random.sample(range(len(data['embeds'])), min(num_samples, len(data['embeds'])))
@@ -137,16 +139,18 @@ def main():
         embeds = list(zip(embeds_actual, preps))
         print("loaded!")
         caches = {
-            "Surprisal": Surprisal(same_embed_distance),
+            #"Surprisal": Surprisal(same_embed_distance),
             # "HillClimbingLRFU": HillClimbingLRFU(same_embed_distance, .1, num_samples // 25),
             # "SurprisalReg": SurprisalReg(same_embed_distance),
             #"CountChars": CountChars(same_embed_distance),
             #"CountWords": CountWords(same_embed_distance),
             # "HillClimbingLRFU": HillClimbingLRFU(same_embed_distance),
             #"Freq": FreqOPT(same_embed_distance, dim=dim),
-            "RL_OPT": RelaxedLearnedOPT(same_embed_distance, dim=dim),
+            #"RL_OPT": RelaxedLearnedOPT(same_embed_distance, dim=dim),
             "R_OPT": RelaxedOPT(same_embed_distance, embeds_actual),
             "OPT": OPT(same_embed_distance, embeds_actual),
+            "ClusterOPT": ClusterOPT(same_embed_distance, embeds_actual),
+            "ClusterRelaxedOPT": ClusterRelaxedOPT(same_embed_distance, embeds_actual),
             #"BetterTinyLFU": BetterTinyLFU(same_embed_distance),
             #"TinyLFU": TinyLFU(same_embed_distance),
             #"RAP": RAP(same_embed_distance),

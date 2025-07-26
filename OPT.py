@@ -15,7 +15,8 @@ import re
 from scipy.stats._stats_py import median_abs_deviation
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.model_selection import train_test_split
-
+from sklearn.model_selection import TimeSeriesSplit
+from reduce_dim import cluster_complete_linkage_faiss, cluster_embeddings_faiss, greedy_cluster_faiss
 
 class OPT(Cache):
 
@@ -86,6 +87,151 @@ class OPT(Cache):
         return cache_hits, evicted_items + rejected_items
 
 
+class ClusterRelaxedOPT(Cache):
+    def __init__(self, same_embed_distance, embeds, belady_boundary_coe=2.0):
+        super().__init__(same_embed_distance)
+        self.belady_boundary_coe = belady_boundary_coe
+        self.embeds_covers, self.embeds_clusters = self.create_embeds_covers(embeds, same_embed_distance)
+
+    def get_belady_boundary(self):
+        return self.capacity * self.belady_boundary_coe
+
+    def create_embeds_covers(self, embeds, same_embed_distance):
+        embeds_clusters = cluster_complete_linkage_faiss(embeds, same_embed_distance)
+        n_clusters = len(set(embeds_clusters))
+        embeds_covers = [[] for _ in range(n_clusters)]
+        for i_embed, i_cluster in enumerate(embeds_clusters):
+            embeds_covers[i_cluster].append(i_embed)
+        embeds_covers = [np.sort(embed_covers) for embed_covers in embeds_covers]
+        return np.array(embeds_covers, dtype=object), embeds_clusters
+
+    def initialize(self, capacity: int, index):
+        self.items = {}
+        self.curr_embed_id = 0
+        self.belady_boundary = np.inf
+        super().initialize(capacity, index)
+
+    def get_next_hits(self, embeds_ids):
+        embeds_clusters_ids = self.embeds_clusters[embeds_ids]
+        curr_id = self.curr_embed_id
+        next_hits = {}
+        for embed_id, row in zip(embeds_ids, self.embeds_covers[embeds_clusters_ids]):
+            i = row.searchsorted(curr_id, side='right')
+            next_hit = np.inf
+            if len(row) > 0 and len(row) > i:
+                next_hit = row[i]
+            next_hits[embed_id] = next_hit
+        return next_hits
+    
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
+        cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
+        evicted_items = []
+        rejected_items = []
+        additions = []
+
+        # Refresh next hits of stale items
+        stale_items = [eid for (eid, next_hit) in self.items.items() if next_hit <= self.curr_embed_id]
+        if len(stale_items) > 0:
+            self.items.update(self.get_next_hits(stale_items))
+
+        # Predict next hits
+        embeds_next_hits = self.get_next_hits(embeds_ids)
+        belady_boundary = self.get_belady_boundary()
+
+        # Select candidates to evict
+        evict_cands = [eid for eid, next_hit in self.items.items() if next_hit > self.curr_embed_id + belady_boundary]
+        np.random.shuffle(evict_cands)
+
+        for embed, embed_id in zip(embeds, embeds_ids):
+            self.curr_embed_id = embed_id
+            embed_next_hit = embeds_next_hits[embed_id]
+
+            if self.capacity <= self.size():
+                if evict_cands:
+                    evicted_id = evict_cands.pop()
+                else:
+                    evicted_id = max(self.items, key=self.items.get, default=None)
+                evicted_items.append(evicted_id)
+                self.items.pop(evicted_id, None)
+
+            if self.capacity > self.size():
+                self.items[embed_id] = embed_next_hit
+                additions.append((embed_id, embed))
+
+        if additions:
+            additions_embeds = [v for (_, v) in additions]
+            additions_ids = [v for (v, _) in additions]
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
+
+        return cache_hits, evicted_items + rejected_items
+
+class ClusterOPT(Cache):
+    def __init__(self, same_embed_distance, embeds):
+        super().__init__(same_embed_distance)
+        self.embeds_covers, self.embeds_clusters = self.create_embeds_covers(embeds, same_embed_distance)
+
+    def create_embeds_covers(self, embeds, same_embed_distance):
+        embeds_clusters = cluster_complete_linkage_faiss(embeds, same_embed_distance)
+        n_clusters = len(set(embeds_clusters))
+        embeds_covers = [[] for _ in range(n_clusters)]
+        for i_embed, i_cluster in enumerate(embeds_clusters):
+            embeds_covers[i_cluster].append(i_embed)
+        embeds_covers = [np.sort(embed_covers) for embed_covers in embeds_covers]
+        return np.array(embeds_covers, dtype=object), embeds_clusters
+
+    def initialize(self, capacity: int, index):
+        self.items = {}
+        self.curr_embed_id = 0
+        super().initialize(capacity, index)
+    
+    def get_next_hits(self, embeds_ids):
+        embeds_clusters_ids = self.embeds_clusters[embeds_ids]
+        curr_id = self.curr_embed_id
+        next_hits = {}
+        for embed_id, row in zip(embeds_ids, self.embeds_covers[embeds_clusters_ids]):
+            i = row.searchsorted(curr_id, side='right')
+            next_hit = np.inf
+            if len(row) > 0 and len(row) > i:
+                next_hit = row[i]
+            next_hits[embed_id] = next_hit
+        return next_hits
+    
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
+        cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
+        evicted_items = []
+        rejected_items = []
+        additions = []
+                
+        stale_items = [eid for (eid, next_hit) in self.items.items() if next_hit <= self.curr_embed_id]
+        if len(stale_items) > 0:
+            self.items.update(self.get_next_hits(stale_items))
+        
+        embeds_next_hits = self.get_next_hits(embeds_ids)
+        for embed, embed_id in zip(embeds, embeds_ids):
+            embed_next_hit = embeds_next_hits[embed_id] 
+            self.curr_embed_id = embed_id
+            max_next_hit_embed_id = max(self.items, key=self.items.get, default=None)
+            max_next_hit = self.items.get(max_next_hit_embed_id, float('inf'))
+            if self.capacity > self.size() or (embed_next_hit < max_next_hit and embed_next_hit not in self.items.values()):
+                if self.capacity <= self.size():
+                    evicted_items.append(max_next_hit_embed_id)
+                    self.items.pop(max_next_hit_embed_id, None)
+                self.items[embed_id] = embed_next_hit
+                additions.append((embed_id, embed))
+            else: 
+                rejected_items.append(embed_id)
+        if additions:
+            additions_embeds = [v for (_, v) in additions]
+            additions_ids = [v for (v, _) in additions]
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
+        return cache_hits, evicted_items + rejected_items
+
 class RelaxedOPT(Cache):
 
     def __init__(self, same_embed_distance, embeds, belady_boundary_coe=2.0):
@@ -133,7 +279,7 @@ class RelaxedOPT(Cache):
         rejected_items = []
         additions = []
         
-        stale_items = [eid for (eid, next_hit) in self.items.items() if next_hit < self.curr_embed_id]
+        stale_items = [eid for (eid, next_hit) in self.items.items() if next_hit <= self.curr_embed_id]
         if len(stale_items) > 0:
             self.items.update(self.get_next_hits(stale_items))
         
@@ -176,14 +322,13 @@ class RLB_Reg():
 
     def __init__(self, train_capacity, deltas_count=8, same_embed_distance=0.5, belady_boundary_coe=2, dim=384):
         self.train_capacity = train_capacity
-        self.training_data = {}
+        self.labeled_data = {}
+        self.unlabeled_data = {}
         self.index_train = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
         self.reg = None
         self.train_counter = 0
         self.deltas_count = deltas_count
         self.same_embed_distance = same_embed_distance
-        self.labeled_count = 0
-        self.awaiting_label_embed_ids = set()
         self.belady_boundary_coe = belady_boundary_coe
         self.dim = dim
     
@@ -194,10 +339,7 @@ class RLB_Reg():
         return self.train_capacity * self.belady_boundary_coe
     
     def remove_labeled_from_training(self):
-        removed_embeds_ids = [eid for (eid, entry) in self.training_data.items() if entry[1] is not None]
-        self.training_data = {k: v for (k, v) in self.training_data.items() if k not in removed_embeds_ids}
-        self.index_train.remove_ids(np.array(removed_embeds_ids))
-        self.labeled_count = 0
+        self.labeled_data = {}
 
     def get_in_range_stored_embeds(self, embeds, radius):
         radius_squared = radius ** 2
@@ -226,37 +368,47 @@ class RLB_Reg():
                 edcs[edc_index] = 1 + edcs[edc_index] * decay_factor
         return edcs
     
-    def record_for_training(self, embeds_ids, embeds, embeds_texts):
-        if self.labeled_count >= self.train_capacity:
+    def record_for_label(self, embeds_ids, embeds, embeds_texts):
+        if len(self.labeled_data) >= self.train_capacity:
             self.train()
-        features, cache_hits = self.get_features(embeds_ids, embeds, embeds_texts)
+        _, cache_hits = self.get_features(embeds_ids, embeds, embeds_texts)
         for embed_id, embed_cache_hits in cache_hits.items():
-            self.training_data[embed_id] = [features.loc[embed_id], None]
-            self.awaiting_label_embed_ids.add(embed_id)
             for cache_hit_embed_id in embed_cache_hits:
-                entry = self.training_data.get(cache_hit_embed_id, None)
-                if entry is not None and entry[1] is None:
-                    self.labeled_count += 1
-                    self.awaiting_label_embed_ids.remove(cache_hit_embed_id)
-                    entry[1] = np.log1p(embed_id - cache_hit_embed_id)
+                entry = self.unlabeled_data.pop(cache_hit_embed_id, None)
+                if entry is not None:
+                    elapsed_time = embed_id - entry[1]
+                    entry[1] = np.log1p(elapsed_time)
+                    self.labeled_data[cache_hit_embed_id] = entry
+        self.index_train.add_with_ids(embeds, np.array(embeds_ids))
+        if self.index_train.ntotal > self.train_capacity:
+            count_remove = self.index_train.ntotal - self.train_capacity
+            begin = max(embeds_ids) - self.train_capacity
+            embeds_ids_remove = list(range(begin, begin + count_remove)) 
+            self.index_train.remove_ids(np.array(embeds_ids_remove))
         
         curr_time = max(embeds_ids)
-        old_unlabeled = [v for v in self.awaiting_label_embed_ids if (curr_time - v) >= self.get_belady_boundary()] 
+        old_unlabeled = [v for v in self.unlabeled_data.keys() if (curr_time - v) >= self.train_capacity] 
         for embed_id in old_unlabeled:
-            entry = self.training_data.get(embed_id)
-            entry[1] = np.log1p(self.get_belady_boundary())
-            self.labeled_count += 1
-        self.awaiting_label_embed_ids.difference_update(old_unlabeled)
-        
-        self.index_train.add_with_ids(embeds, np.array(embeds_ids))
+            entry = self.unlabeled_data.pop(embed_id)
+            entry[1] = np.log1p(2 * self.train_capacity)
+            self.labeled_data[embed_id] = entry
+
     
+    
+    def record_for_training(self, embeds_ids, embeds, embeds_texts, curr_time):
+        features, cache_hits = self.get_features(embeds_ids, embeds, embeds_texts)
+        for embed_id, embed_cache_hits in cache_hits.items():
+            self.unlabeled_data[embed_id] = [features.loc[embed_id], curr_time]
+        
+
+            
     def predict_tmp(self, embeds_ids, embeds, embeds_texts, actual_log):
         # 1) feature extraction
-        X, _ = self.get_features(embeds_ids, embeds, embeds_texts)
-        dmat = xgb.DMatrix(X.astype(np.float32))
+        X, _ = self.get_features(embeds_ids, embeds, embeds_texts)       
+        log_time_hit_pred = self.reg.predict(X)
 
         # 2) predict in log‑space, then convert to real time
-        log_pred = self.reg.predict(dmat)               # log1p(time_to_hit̂ )
+        log_pred = log_time_hit_pred               # log1p(time_to_hit̂ )
         t_pred   = np.expm1(log_pred)                   # time_to_hit̂  in original units
         y_pred   = embeds_ids + t_pred                  # absolute time of next hit
 
@@ -287,9 +439,13 @@ class RLB_Reg():
         cache_hits = {}
         
         for i, (embed_id, embed_text) in enumerate(zip(embeds_ids, embeds_text)):
-            embed_dists = dists[i]
-            embed_ids = ids[i]
-            sorted_hits = np.sort([embed_id] + list(embed_ids))
+            hits_dists = dists[i]
+            hits_ids = list(ids[i])
+            if max(hits_ids, default=-1) > embed_id:
+                x = 3
+            if embed_id not in hits_ids:
+                hits_ids.append(embed_id)
+            sorted_hits = np.sort(hits_ids)
             deltas = np.diff(sorted_hits)
             edc = self.calc_edc(deltas, 4)
             recent_deltas = pad_array(deltas, self.deltas_count, -1)
@@ -300,31 +456,30 @@ class RLB_Reg():
             count_vocab = len(set(words))
             count_sents = len(re.split(r"[.!?;]+", embed_text))
             mean_word_len = sum([len(word) for word in words], 0) / len(words) if len(words) > 0 else 0
-            data_available = len(self.training_data)
+            index_in_hits = list(reversed(sorted_hits)).index(embed_id)
             embed_features = {
                 "embed_id": embed_id,
-                "count hits": embed_dists.size,
-                "mean hit distance": np.mean(embed_dists) if len(embed_dists) > 0 else -1,
+                # "count hits": embed_dists.size,
+                "mean hit distance": np.mean(hits_dists) if len(hits_dists) > 0 else -1,
                 # Misc
-                "data available": data_available,
+                # "data available": data_available,
+                "index in hits": index_in_hits,
                 # Deltas related
-                # edc,
                 # Sentence related
                 #mean_word_len,
                 #count_sents,
                 #count_vocab,
-                "count words": count_words,
+                #"count words": count_words,
                 #count_whitespace,
-                "count chars": count_chars,
-                "surprisal": calculate_surprisal(embed_text),
+                #"count chars": count_chars,
+                #"surprisal": calculate_surprisal(embed_text),
                 # Distance related
                 #np.min(embed_dists) if embed_dists.size else -1,
                 #np.max(embed_dists) if embed_dists.size else -1,
-                ".25 quantile distance": np.quantile(embed_dists, .25) if embed_dists.size else -1,
-                #np.quantile(embed_dists, .25) if embed_dists.size else -1,
-                #np.quantile(embed_dists, .75) if embed_dists.size else -1,
-                ".75 quantile distance": np.quantile(embed_dists, .75) if embed_dists.size else -1,
-                "std hit distance": np.std(embed_dists) if embed_dists.size else -1,
+                #".25 quantile distance": np.quantile(embed_dists, .25) if embed_dists.size else -1,
+                ".25 quantile distance": np.quantile(hits_dists, .25) if hits_dists.size else -1,
+                ".75 quantile distance": np.quantile(hits_dists, .75) if hits_dists.size else -1,
+                "std hit distance": np.std(hits_dists) if hits_dists.size else -1,
             }
             # add delta
             for i, delta in enumerate(recent_deltas):
@@ -333,103 +488,92 @@ class RLB_Reg():
                 embed_features[f'edc_{i}'] = edc
 
             features.append(embed_features)
-            cache_hits[embed_id] = embed_ids
+            cache_hits[embed_id] = hits_ids
 
         features = pd.DataFrame(features).set_index('embed_id').fillna(-1).astype(np.float32)
         return features, cache_hits
-    
+
     def train(self):
         self.train_counter += 1
+        # print("Training...")
 
-        # ---------- 1. gather rows ----------
-        rows          = []
-        lower_bounds  = []
-        upper_bounds  = []
+        # Extract features and labels
+        features_list = []
+        labels_list = []
 
-        censor_val = np.log1p(self.get_belady_boundary())  # sentinel for “no‑hit”
+        for features_df, label in self.labeled_data.values():
+            features_list.append(features_df)  # each is a 1-row DataFrame
+            labels_list.append(label)
 
-        for feat_df, lbl in self.training_data.values():
-            if lbl is None:
-                continue
+        # Concatenate all features into a single DataFrame
+        X = pd.DataFrame(features_list)
+        y = pd.Series(labels_list, name="target")
 
-            # feat_df is a 1‑row DataFrame → take the row as a Series
-            rows.append(feat_df)
+        tscv = TimeSeriesSplit(n_splits=5)
+        fold = 0
+        scores = []
 
-            if lbl >= censor_val:            # right‑censored sample
-                lower_bounds.append(lbl)
-                upper_bounds.append(np.inf)
-            else:                            # exact (uncensored) hit‑time
-                lower_bounds.append(lbl)
-                upper_bounds.append(lbl)
+        for train_index, test_index in tscv.split(X):
+            fold += 1
+            X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+            y_train, y_test = y.iloc[train_index], y.iloc[test_index]
 
-        if not rows:        # nothing labelled yet
-            return
+            reg = xgb.XGBRegressor(
+                max_depth=4,
+                n_estimators=200,
+                learning_rate=0.05,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                reg_alpha=1.0,
+                reg_lambda=2.0,
+                objective='reg:squarederror',
+                verbosity=0,
+                random_state=42
+            )
 
-        # ---------- 2. build feature matrix ----------
-        X_full = pd.DataFrame(rows).astype(np.float32).reset_index(drop=True)
-        lb     = np.asarray(lower_bounds, dtype=np.float32)
-        ub     = np.asarray(upper_bounds, dtype=np.float32)
+            reg.fit(X_train, y_train)
 
-        # ---------- 3. train / test split ----------
-        split_at   = int(0.90 * len(X_full))
-        X_train    = X_full.iloc[:split_at]
-        X_test     = X_full.iloc[split_at:]
-        lb_train   = lb[:split_at]
-        lb_test    = lb[split_at:]
-        ub_train   = ub[:split_at]
-        ub_test    = ub[split_at:]
+            preds_train = reg.predict(X_train)
+            preds_test = reg.predict(X_test)
 
-        # ---------- 4. DMatrix with censoring ----------
-        dtrain = xgb.DMatrix(
-            data=X_train,
-            label_lower_bound=lb_train,
-            label_upper_bound=ub_train
+            mse_train = mean_squared_error(y_train, preds_train)
+            mae_train = mean_absolute_error(y_train, preds_train)
+            r2_train = r2_score(y_train, preds_train)
+
+            mse_test = mean_squared_error(y_test, preds_test)
+            mae_test = mean_absolute_error(y_test, preds_test)
+            r2_test = r2_score(y_test, preds_test)
+
+            print(f"\nFold {fold}")
+            print(f"Train    | MSE {mse_train:.4f}  MAE {mae_train:.4f}  R² {r2_train:.4f}")
+            print(f"Test     | MSE {mse_test:.4f}  MAE {mae_test:.4f}  R² {r2_test:.4f}")
+            scores.append((mse_test, mae_test, r2_test))
+
+        # Optional: Train final model on all data
+        self.reg = xgb.XGBRegressor(
+            max_depth=4,
+            n_estimators=200,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=1.0,
+            reg_lambda=2.0,
+            objective='reg:squarederror',
+            verbosity=0,
+            random_state=42
         )
-        dtest  = xgb.DMatrix(
-            data=X_test,
-            label_lower_bound=lb_test,
-            label_upper_bound=ub_test
-        )
+        self.reg.fit(X, y)
 
-        # ---------- 5. AFT model params ----------
-        params = {
-            "objective":               "survival:aft",
-            "aft_loss_distribution":   "normal",
-            "aft_loss_distribution_scale": 1.0,
-            "max_depth":   4,
-            "learning_rate": 0.05,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "reg_alpha": 1.0,
-            "reg_lambda": 2.0,
-            "verbosity": 0,
-            "seed": 42,
-        }
-
-        # ---------- 6. train ----------
-        self.reg = xgb.train(params, dtrain, num_boost_round=256)
-
-        # ---------- 7. metrics ----------
-        preds_train = self.reg.predict(dtrain)
-        preds_test  = self.reg.predict(dtest)
-
-        def show_metrics(name, y_true, y_pred):
-            mse = mean_squared_error(y_true, y_pred)
-            mae = mean_absolute_error(y_true, y_pred)
-            r2  = r2_score(y_true,  y_pred)
-            print(f"{name:8s} | MSE {mse:.4f}  MAE {mae:.4f}  R² {r2:.4f}")
-
-        show_metrics("Train", lb_train, preds_train)
-        show_metrics("Test",  lb_test,  preds_test)
-
-        # ---------- 8. feature importance ----------
-        print("\nTop features (gain):")
-        for k, v in sorted(self.reg.get_score(importance_type="gain").items(),
-                        key=lambda kv: kv[1], reverse=True)[:15]:
-            print(f"  {k:25s} {v:.3f}")
-
-        # ---------- 9. housekeeping ----------
+        # Final feature importances
+        imp = self.reg.get_booster().get_score(importance_type='gain')
+        print("\nFinal Feature Importances (Gain):")
+        for k, v in sorted(imp.items(), key=lambda x: x[1], reverse=True):
+            print(f"{k:25s} → Gain: {v:.3f}")
+        
+        self.labeled_data = {}
+        
         self.remove_labeled_from_training()
+
 
     
 class RelaxedLearnedOPT(Cache):
@@ -443,51 +587,57 @@ class RelaxedLearnedOPT(Cache):
 
     def initialize(self, capacity: int, index):
         self.train_counter = 0
-        self.evict_cands = set()
         self.items = OrderedDict()
-        self.labeled_count = 0
         self.belady_boundary = np.inf
         self.curr_embed_id = 0
         train_capacity = int(self.train_capacity_ratio * capacity)
         self.reg = RLB_Reg(train_capacity, self.deltas_count, self.same_embed_distance, self.belady_boundary_coe, self.dim)
-        self.training_data = {}
         self.index_train = faiss.IndexIDMap2(faiss.IndexFlatL2(self.dim))
         super().initialize(capacity, index)    
     
     def predict(self, embeds_ids, embeds, embeds_text):
         return self.reg.predict(np.array(embeds_ids), np.array(embeds), embeds_text)
     
-    def select_evict_cands(self):
+    def ml_evict_embed(self):
         predict_size = min(64, len(self.items))
-        evict_size = 1
         sampled_items = random.sample(list(self.items.items()), predict_size)
         embeds_ids, embeds_and_embeds_texts = zip(*sampled_items)
         (embeds, embeds_text) = zip(*embeds_and_embeds_texts)
         predicts = self.reg.predict(np.array(embeds_ids), np.array(embeds), embeds_text)
-        indices = np.argpartition(np.array(predicts), evict_size - 1)[:evict_size]
-        selected_embeds_ids = {embeds_ids[i] for i in indices}
-        self.evict_cands.update(selected_embeds_ids)
+        index = np.argmin(np.array(predicts))
+        return embeds_ids[index]
     
     def get_evict_embed_id(self):
-        if len(self.evict_cands) == 0 and self.reg.get_train_counter() > 0:
-            self.select_evict_cands()
-        if len(self.evict_cands) > 0:
-            evict_embed_id = self.evict_cands.pop()
+        if self.reg.get_train_counter() > 0:
+            evict_embed_id = self.ml_evict_embed()
             embed, embed_text = self.items.pop(evict_embed_id)
             return evict_embed_id
         else:
             evict_embed_id, (embed, embed_text) = self.items.popitem(last=False)
             return evict_embed_id
 
+    def sample_for_recording(self, count_record: int) -> None:
+        cands = list(set(self.items.keys())-set(self.reg.unlabeled_data.keys()))
+        embeds_ids = random.sample(cands, count_record)
+        embeds_data = [self.items[embed_id] for embed_id in embeds_ids]
+        embeds, embeds_texts = zip(*embeds_data)
+        self.reg.record_for_training(np.array(embeds_ids), np.array(embeds), embeds_texts, self.curr_embed_id)
+        
     
     def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, cache_hits_ids = self.get_closest_stored_embeds(embeds, count_nn)
-        self.reg.record_for_training(embeds_ids, embeds, texts)
         
-        flat_cache_hits_ids = cache_hits_ids.ravel()[cache_hits_ids.ravel() != -1]
-        for hit_embed_id in flat_cache_hits_ids:
-            self.evict_cands.discard(hit_embed_id)
-            self.items.move_to_end(hit_embed_id)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        for i_embed, i_nn in zip(*cache_hits_indices):
+            nn = cache_hits_ids[i_embed][i_nn]
+            self.items.move_to_end(nn)
+        
+        # For maintaining LRU
+        if self.reg.train_counter == 0:
+            flat_cache_hits_ids = cache_hits_ids.ravel()[cache_hits_ids.ravel() != -1]
+            for hit_embed_id in flat_cache_hits_ids:
+                self.items.move_to_end(hit_embed_id)
         
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
@@ -498,11 +648,14 @@ class RelaxedLearnedOPT(Cache):
             if self.capacity <= self.size():
                 evict_embed_id = self.get_evict_embed_id()
                 evicted_items.append(evict_embed_id)
-            if self.capacity >= self.size():
+            if self.capacity > self.size():
                 self.items[embed_id] = (embed, embed_text)
                 additions.append((embed_id, embed))
-            self.curr_embed_id += 1
 
+        self.curr_embed_id += len(embeds_ids)
+        self.reg.record_for_label(np.array(embeds_ids), np.array(embeds), texts)
+        self.sample_for_recording(len(embeds))
+                
         if additions:
             additions_embeds = [v for (_, v) in additions]
             additions_ids = [v for (v, _) in additions]
