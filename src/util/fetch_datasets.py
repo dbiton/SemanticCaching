@@ -1,3 +1,4 @@
+from itertools import chain
 import os
 import pickle
 import random
@@ -113,6 +114,33 @@ if __name__ == "__main__":
             questions_chat = [e['conversation'][0]['content'] for e in ds_chat['train'] if e['language'] == "English"]
             embeds_chat = embed_strings(questions_chat)
             pickle.dump({"text": questions_chat, "embeds": embeds_chat}, f)
+    
+    print("generating OpenAssistant...")
+    with writer(os.path.join(embeds_dir, "embeds_oasst.pkl")) as f:
+        if f is not None:
+            ds_oasst = load_dataset("OpenAssistant/oasst1")
+            questions_oasst = [v['text'] for v in ds_oasst['train'] if v['lang'] == 'en' and v['role'] == 'prompter']
+            embeds_oasst = embed_strings(questions_oasst)
+            pickle.dump({"text": questions_oasst, "embeds": embeds_oasst}, f)
+
+    print("generating PersonaChat-like (BlenderBot distill)...")
+    with writer(os.path.join(embeds_dir, "embeds_persona.pkl")) as f:
+        if f is not None:
+            ds_persona = load_dataset("AlekseyKorshuk/persona-chat")
+            questions_lists = [v[-1]['history'] for v in ds_persona['train']['utterances']]
+            questions = list(chain.from_iterable(questions_lists))
+            embeds_persona = embed_strings(questions)
+            pickle.dump({"text": questions, "embeds": embeds_persona}, f)
+
+    print("generating Quora...")
+    with writer(os.path.join(embeds_dir, "embeds_quora.pkl")) as f:
+        if f is not None:
+            ds_quora = load_dataset("quora", trust_remote_code=True)
+            question_pairs = [v['text'] for v in ds_quora['train']['questions']]
+            questions = list(chain.from_iterable(question_pairs))
+            embeds_quora = embed_strings(questions)
+            pickle.dump({"text": questions, "embeds": embeds_quora}, f)
+    
     '''
     if steam_full:
         print("generating steam...")

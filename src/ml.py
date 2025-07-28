@@ -6,8 +6,7 @@ from sklearn.decomposition import PCA
 import tqdm
 
 from OPT import RLB_Reg, RelaxedLearnedOPT, RelaxedOPT
-from freq_reg import FreqReg
-from reduce_dim import reduce_dim
+from src.util.reduce_dim import reduce_dim
 from random import sample
 from sklearn.metrics import (
     confusion_matrix, accuracy_score, precision_score,
@@ -16,6 +15,7 @@ from sklearn.metrics import (
     classification_report
 )
 from cache import LFU, LRU
+import random
 
 def binary_classification_stats(y_true, y_pred):
     y_true = np.asarray(y_true).astype(int)
@@ -74,12 +74,12 @@ def load_embeds_covers():
         return pickle.load(f)
 
 dataset_filenames = {
-    "persona": "datasets_text/embeds_persona.pkl",
-    "quora": "datasets_text/embeds_quora.pkl",
     "OAsst": "datasets_text/embeds_oasst.pkl",
-    "WildChat": "datasets_text/embeds_chat.pkl",
-    "Bing": "datasets_text/embeds_bing.pkl",
-    "StackOverflow": "datasets_text/embeds_so.pkl",
+    #"persona": "datasets_text/embeds_persona.pkl",
+    #"quora": "datasets_text/embeds_quora.pkl",
+    #"WildChat": "datasets_text/embeds_chat.pkl",
+    #"Bing": "datasets_text/embeds_bing.pkl",
+    #"StackOverflow": "datasets_text/embeds_so.pkl",
     #"ComQA": "datasets_text/embeds_ComQA.pkl",
     #"Steam": "datasets/embeds_steam.pkl",
 }
@@ -142,11 +142,12 @@ def yield_batches(lst, k):
 def test_regressor():
     DIM = 384
     DELTAS_COUNT = 4
-    STREAM_SIZE = 20000
-    CACHE_SIZE = 5000
+    STREAM_SIZE = 100000
+    CACHE_SIZE = 10000
     BELADY_BOUNDARY_COE = 2.0
-    SAME_EMBED_DISTANCE = .75
+    SAME_EMBED_DISTANCE = .5
     BATCH_SIZE = 10
+    random.seed(42)
     for dataset_name, data in load_embeds():
         reg = RLB_Reg(CACHE_SIZE, DELTAS_COUNT, SAME_EMBED_DISTANCE, BELADY_BOUNDARY_COE, DIM)
         indices = sample(range(len(data['embeds'])), min(STREAM_SIZE, len(data['embeds'])))
@@ -168,7 +169,7 @@ def test_regressor():
                 actual = get_next_hits(embeds_covers, i_embeds[0], i_embeds)
                 indices_replace = (actual - np.array(i_embeds)) > reg.get_belady_boundary()
                 actual[indices_replace] = belady_boundary[indices_replace]
-                actual_pred = np.log2(actual - np.array(i_embeds))
+                actual_pred = np.log1p(actual - np.array(i_embeds))
                 predict = reg.predict_tmp(i_embeds, embeds_embeds, embeds_texts, actual_pred)
                 maes.append(np.abs(actual-predict))
                 print(np.mean(maes))
@@ -195,20 +196,23 @@ def show(y_true, y_pred):
 
 def test_policy():
     DIM = 384
-    DELTAS_COUNT = 8
-    STREAM_SIZE = 10000
+    DELTAS_COUNT = 4
+    STREAM_SIZE = 3000
     CACHE_SIZE = 1000
-    BATCH_SIZE = 10
+    BATCH_SIZE = 1
     COUNT_NN = 1
-    SAME_EMBED_DISTANCE = .75
-    BELADY_BOUNDARY_COE = 2.0
+    SAME_EMBED_DISTANCE = 1.
+    BELADY_BOUNDARY_COE = 1.0
     for dataset_name, data in load_embeds():
         indices = sample(range(len(data['embeds'])), min(STREAM_SIZE, len(data['embeds'])))
         preps = [data['text'][i] for i in indices]
         embeds_actual = reduce_dim(np.array([data['embeds'][i] for i in indices]), DIM)
         embeds = list(zip(embeds_actual, preps))
         embeds_covers = create_embeds_covers(embeds_actual, SAME_EMBED_DISTANCE)
-        for cache in [LRU(SAME_EMBED_DISTANCE), RelaxedOPT(SAME_EMBED_DISTANCE, embeds_actual, BELADY_BOUNDARY_COE)]:#, RelaxedLearnedOPT(SAME_EMBED_DISTANCE, DELTAS_COUNT, 1, BELADY_BOUNDARY_COE, DIM)]:
+        for cache in [
+            LRU(SAME_EMBED_DISTANCE), 
+            #RelaxedOPT(SAME_EMBED_DISTANCE, embeds_actual, BELADY_BOUNDARY_COE)]:
+            RelaxedLearnedOPT(SAME_EMBED_DISTANCE, DELTAS_COUNT, 1, BELADY_BOUNDARY_COE, DIM)]:
             index = faiss.IndexIDMap2(faiss.IndexFlatL2(DIM))
             cache.initialize(CACHE_SIZE, index)
             count_evicts = 0
@@ -223,41 +227,10 @@ def test_policy():
                     next_hits = get_next_hits(embeds_covers, next_i_embed, evicted_embeds_ids) - i_embeds[-1]
                     count_good_evicts += len(np.where(next_hits >= BELADY_BOUNDARY_COE * CACHE_SIZE)[0])
                 # pbar.update(len(batch_embeds))
-            print()
             print(dataset_name, type(cache), "GDR:", count_good_evicts / count_evicts, count_good_evicts, count_evicts)
-        
-
-def test_freq_reg():
-    DIM = 384
-    DELTAS_COUNT = 8
-    STREAM_SIZE = 100000
-    CACHE_SIZE = 10000
-    SAME_EMBED_DISTANCE = .5
-    BATCH_SIZE = 10
-    for dataset_name, embeds in load_embeds():
-        reg = FreqReg(CACHE_SIZE, 4 * CACHE_SIZE, DELTAS_COUNT, SAME_EMBED_DISTANCE, DIM)
-        embeds = reduce_dim(embeds, DIM, STREAM_SIZE)
-        print(dataset_name)
-        embeds = embeds[:STREAM_SIZE]
-        embeds_covers = create_embeds_covers(embeds, SAME_EMBED_DISTANCE)
-        total_mean = 0
-        total_count = 0
-        pbar = tqdm.tqdm(total=len(embeds), desc=f"Processing {dataset_name}...")
-        for batch_embeds, i_embeds in yield_batches(embeds, BATCH_SIZE):
-            pbar.update(len(batch_embeds))
-            if reg.is_trained():
-                predict = reg.predict(i_embeds, batch_embeds)
-                actual = get_counts_hits(embeds_covers, i_embeds[0], i_embeds)
-                actual = actual / (len(embeds) - np.array(i_embeds))
-                mean = np.mean(np.abs(actual - predict))
-                total_count += 1
-                n = total_count
-                total_mean = total_mean * (n-1)/n + mean / n
-            reg.record_for_training(i_embeds, batch_embeds)
-        print(total_mean)
         
     
 if __name__ == "__main__":
-    test_regressor()
+    test_policy()
 
                 

@@ -113,5 +113,3 @@ def train():
     plt.gca().invert_yaxis()
     plt.tight_layout()
     plt.show()
-    
-train()

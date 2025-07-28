@@ -1,48 +1,48 @@
+import sys
+sys.path.append(".")
+
 from concurrent.futures import ProcessPoolExecutor
 import copy
-from itertools import chain
-import json
 import os
 import pickle
 from random import sample
 import time
-from typing import Dict, List
 import faiss
 from matplotlib import pyplot as plt
 import numpy as np
-import pandas as pd
 from sentence_transformers import SentenceTransformer
 import tqdm
-from cache import *
-from OPT import RelaxedLearnedOPT, RelaxedOPT, OPT, ClusterOPT,\
+
+from caches.cache import *
+from caches.OPT import RelaxedLearnedOPT, RelaxedOPT, OPT, ClusterOPT,\
     ClusterRelaxedOPT
-from lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
-from reduce_dim import reduce_dim
-from surprisal_reg_cache import SurprisalReg
+from caches.lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
+from src.util.reduce_dim import reduce_dim
 
 dataset_filenames = {
-    "WildChat": "datasets_text/embeds_chat.pkl",
-    "Bing": "datasets_text/embeds_bing.pkl",
-    "StackOverflow": "datasets_text/embeds_so.pkl",
-    "ComQA": "datasets_text/embeds_ComQA.pkl",
-    "persona": "datasets_text/embeds_persona.pkl",
-    "quora": "datasets_text/embeds_quora.pkl",
-    "OAsst": "datasets_text/embeds_oasst.pkl",
+    "WildChat": "datasets/embeds_chat.pkl",
+    "Bing": "datasets/embeds_bing.pkl",
+    "StackOverflow": "datasets/embeds_so.pkl",
+    "ComQA": "datasets/embeds_ComQA.pkl",
+    "persona": "datasets/embeds_persona.pkl",
+    "quora": "datasets/embeds_quora.pkl",
+    "OAsst": "datasets/embeds_oasst.pkl",
     # "Steam": "datasets/embeds_steam.pkl",
 }
 
 has_gpu = False
-NUM_PROCS = 4
+NUM_PROCS = 1
 
 def plot(dataset_name, results):
     for prop_name, prop_results in results.items():
         plt.figure()
         i = 0
+        linestyles = ["-", "--", "-.", ":"]
         markers = ["o", "s", "^", "v", "D", "<", ">", "X", "+"]
         for cache_name, prop in prop_results.items():
             cache_size = list(prop.keys())
             prop_values = list(prop.values())
-            plt.plot(cache_size, prop_values, label=cache_name, marker=markers[i])
+            plt.plot(cache_size, prop_values, label=cache_name, marker=markers[i], linestyle=linestyles[i % len(linestyles)])
             i += 1
         plt.xlabel("Cache Size")
         plt.ylabel(prop_name)
@@ -125,15 +125,14 @@ def process_layered(args):
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 5000
+    num_samples = 1000
     MAX_CACHE_SIZE = 0.1
     COUNT_STEPS = 8
     dim = 384
     same_embed_distance = .75
-    random.seed(42)
     for dataset_name, data in load_embeds():
         print(f"loaded {dataset_name} with {len(data['embeds'])} examples...")
-        indices = random.sample(range(len(data['embeds'])), min(num_samples, len(data['embeds'])))
+        indices = list(range(num_samples)) #random.sample(range(len(data['embeds'])), min(num_samples, len(data['embeds'])))
         preps = [data['text'][i] for i in indices]
         embeds_actual = reduce_dim(np.array([data['embeds'][i] for i in indices]), dim)
         embeds = list(zip(embeds_actual, preps))

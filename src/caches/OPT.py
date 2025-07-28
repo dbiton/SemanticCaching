@@ -1,7 +1,7 @@
 import bisect
 from collections import OrderedDict
 import pandas as pd
-from cache import Cache
+from caches.cache import Cache
 import numpy as np
 import faiss
 import lightgbm as lgb
@@ -9,14 +9,13 @@ import xgboost as xgb
 import random
 from scipy import stats
 
-from freq_reg import FreqReg
-from surprisal.estimate_frequency import calculate_surprisal
+from util.surprisal import calculate_surprisal
 import re
 from scipy.stats._stats_py import median_abs_deviation
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import TimeSeriesSplit
-from reduce_dim import cluster_complete_linkage_faiss, cluster_embeddings_faiss, greedy_cluster_faiss
+from src.util.reduce_dim import cluster_complete_linkage_faiss, cluster_embeddings_faiss, greedy_cluster_faiss
 
 class OPT(Cache):
 

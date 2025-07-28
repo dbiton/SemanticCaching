@@ -6,8 +6,8 @@ import numpy as np
 from scipy.spatial import distance_matrix
 import faiss
 
-from surprisal.estimate_frequency import calculate_perplexity, calculate_surprisal, calculate_surprisal_gpt
-from online_clusters import OnlineClusters
+from util.surprisal import calculate_perplexity, calculate_surprisal
+from util.online_clusters import OnlineClusters
 
 
 class Cache:

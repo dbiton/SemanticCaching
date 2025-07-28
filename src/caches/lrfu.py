@@ -1,8 +1,8 @@
 from heapdict import heapdict
 
 import numpy as np
-from cache import Cache
-from hill_climber import HillClimber
+from caches.cache import Cache
+from util.hill_climber import HillClimber
 class LRFU(Cache):
     def __init__(self, same_embed_distance, decay_coe: float):
         super().__init__(same_embed_distance)
@@ -59,7 +59,7 @@ class HillClimbingLRFU(LRFU):
         self.window_counter = 0
         self.hill_climber = HillClimber(max_val=1, initial_value=self.decay_coe)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def request(self, embeds, embeds_ids, count_nn=1, texts = []):
         cache_hits, evicted_items = super().request(embeds, embeds_ids, count_nn)
         self.window_counter += len(embeds)
         self.window_hits += np.count_nonzero(cache_hits)
