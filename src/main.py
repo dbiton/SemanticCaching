@@ -1,4 +1,5 @@
 import sys
+from concurrent.futures._base import as_completed
 sys.path.append(".")
 
 from concurrent.futures import ProcessPoolExecutor
@@ -14,6 +15,9 @@ from sentence_transformers import SentenceTransformer
 import tqdm
 
 from caches.cache import *
+from caches.arc import ARC
+from caches.cluster_lru import ClusterLRU
+from caches.lru_k import LRUK
 from caches.OPT import RelaxedLearnedOPT, RelaxedOPT, OPT, ClusterOPT,\
     ClusterRelaxedOPT
 from caches.lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
@@ -31,7 +35,7 @@ dataset_filenames = {
 }
 
 has_gpu = False
-NUM_PROCS = 1
+NUM_PROCS = 4
 
 def plot(dataset_name, results):
     for prop_name, prop_results in results.items():
@@ -52,10 +56,6 @@ def plot(dataset_name, results):
         figures_dir = "figures"
         plt.savefig(os.path.join(figures_dir, f"{dataset_name}_{prop_name}.png"))
 
-def generate_embeds(mean, std_dev, dim, length):    
-    np.random.seed(0)
-    return [np.random.normal(mean, std_dev, dim) for _ in range(length)]
-
 def load_embeds():
     for dataset_name, path in dataset_filenames.items():
         if not os.path.exists(path):
@@ -71,8 +71,11 @@ def yield_batches(lst, k):
 
 
 def process(args):
-    (pbar, cache, cache_size, dim, embeds, cache_name, batch_size, count_nn) = args
+    (cache_tuple, cache_size, dim, embeds, cache_name, batch_size, count_nn) = args
     index = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
+    cache_constructor = cache_tuple[0]
+    cache_args = cache_tuple[1:]
+    cache = cache_constructor(*cache_args)
     cache.initialize(cache_size, index)
     cache_hits = 0
     t0 = time.time()
@@ -81,7 +84,6 @@ def process(args):
         embeds_embeds = np.array([v for (v, _) in batch_embeds])
         iter_cache_hits, evicted_embeds_ids = cache.request(embeds_embeds, i_embeds, count_nn, embeds_texts)
         cache_hits += np.count_nonzero(iter_cache_hits)
-        if pbar is not None: pbar.update(1)
     iter_results = {
         "Cache Name": cache_name,
         "Hit Ratio": cache_hits / len(embeds),
@@ -125,80 +127,64 @@ def process_layered(args):
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 1000
+    num_samples = 10000
     MAX_CACHE_SIZE = 0.1
-    COUNT_STEPS = 8
+    COUNT_STEPS = 10
     dim = 384
     same_embed_distance = .75
     for dataset_name, data in load_embeds():
         print(f"loaded {dataset_name} with {len(data['embeds'])} examples...")
-        indices = list(range(num_samples)) #random.sample(range(len(data['embeds'])), min(num_samples, len(data['embeds'])))
+        indices = list(range(num_samples))
         preps = [data['text'][i] for i in indices]
         embeds_actual = reduce_dim(np.array([data['embeds'][i] for i in indices]), dim)
         embeds = list(zip(embeds_actual, preps))
         print("loaded!")
         caches = {
-            #"Surprisal": Surprisal(same_embed_distance),
-            # "HillClimbingLRFU": HillClimbingLRFU(same_embed_distance, .1, num_samples // 25),
-            # "SurprisalReg": SurprisalReg(same_embed_distance),
-            #"CountChars": CountChars(same_embed_distance),
-            #"CountWords": CountWords(same_embed_distance),
-            # "HillClimbingLRFU": HillClimbingLRFU(same_embed_distance),
-            #"Freq": FreqOPT(same_embed_distance, dim=dim),
-            #"RL_OPT": RelaxedLearnedOPT(same_embed_distance, dim=dim),
-            #"R_OPT": RelaxedOPT(same_embed_distance, embeds_actual),
-            #"OPT": OPT(same_embed_distance, embeds_actual),
             #"ClusterOPT": ClusterOPT(same_embed_distance, embeds_actual),
-            #"ClusterRelaxedOPT": ClusterRelaxedOPT(same_embed_distance, embeds_actual),
-            #"BetterTinyLFU": BetterTinyLFU(same_embed_distance),
-            #"TinyLFU": TinyLFU(same_embed_distance),
-            #"LRFU.1": LRFU(same_embed_distance, .1),
-            #"LRFU.01": LRFU(same_embed_distance, .01),
-            #"LRFU1.": LRFU(same_embed_distance, 1),
-            "ClusterLFU": ClusterLFU(same_embed_distance),
-            "DALFU": DynamicAgingLFU(same_embed_distance, 32),
-            "DistanceLFU": DistanceLFU(same_embed_distance),
-            "LRU": LRU(same_embed_distance),
+            
+            "ARC": (ARC, same_embed_distance),
+            "LRU": (LRU, same_embed_distance),
+            "LRUK": (LRUK, same_embed_distance, 2),
+            "ClusterLRU": (ClusterLRU, same_embed_distance),
+            "ClusterLFU": (ClusterLFU, same_embed_distance),
+            "DistanceLFU": (DistanceLFU, same_embed_distance),
+            "LFU": (LFU, same_embed_distance),
+            "DALFU": (DynamicAgingLFU, same_embed_distance, 32),
+            
             #"PCA": PCA(same_embed_distance),
             #"Radius": FixedRadius(same_embed_distance, similar_embed_distance),
             #"Dummy": Dummy(same_embed_distance),
             #"RR": RR(same_embed_distance),
-            "RAP": RAP(same_embed_distance),
-            "LFU": LFU(same_embed_distance),
-            "SphereLFU": SphereQueryLFU(same_embed_distance),
+            #"RAP": RAP(same_embed_distance),
+            #"SphereLFU": SphereQueryLFU(same_embed_distance),
+
         }
 
-        results = {}
         args = []
-        for cache_name, cache in caches.items():
+        for cache_name, create_cache_args in caches.items():
             step_size = int(num_samples * MAX_CACHE_SIZE // COUNT_STEPS)
             for cache_size in range(step_size, int(num_samples * MAX_CACHE_SIZE), step_size):
-                args.append((copy.deepcopy(cache), cache_size, dim, embeds, cache_name, batch_size, count_nn))
-        num_batches = sum([len(embeds)/batch_size for _, _, _, embeds, _, batch_size, _ in args])
-        if NUM_PROCS > 1:
-            pbar = tqdm.tqdm(total=len(args), desc=f"Processing {dataset_name} with {num_batches} batches")
-            args = [(None, *arg) for arg in args]
-            with ProcessPoolExecutor(NUM_PROCS) as executor:
-                raw_results = executor.map(process, args)
-        else:
-            pbar = tqdm.tqdm(total=num_batches, desc=f"Processing {dataset_name} with {num_batches} batches")
-            args = [(pbar, *arg) for arg in args]
-            raw_results = map(process, args)
-            
-        for iter_results in raw_results:
-            if NUM_PROCS > 1: 
+                args.append((create_cache_args, cache_size, dim, embeds, cache_name, batch_size, count_nn))
+        
+        num_batches = len(caches) * COUNT_STEPS
+        pbar = tqdm.tqdm(total=num_batches, desc=f"Processing {dataset_name} with {num_batches} batches")
+        results = {}
+        with ProcessPoolExecutor(NUM_PROCS) as executor:
+            futures = [executor.submit(process, arg) for arg in args]
+            for future in as_completed(futures):
+                result = future.result()
                 pbar.update(1)
-            for prop_name, prop in iter_results.items():
-                cache_name = iter_results['Cache Name']
-                cache_size = iter_results['Cache Size']
-                if prop_name == 'Cache Name':
-                    continue
-                if prop_name not in results:
-                    results[prop_name] = {}
-                if cache_name not in results[prop_name]:
-                    results[prop_name][cache_name] = {}
-                results[prop_name][cache_name][cache_size] = prop
-            print(cache_name, iter_results)
+                for prop_name, prop in result.items():
+                    cache_name = result['Cache Name']
+                    cache_size = result['Cache Size']
+                    if prop_name == 'Cache Name':
+                        continue
+                    if prop_name not in results:
+                        results[prop_name] = {}
+                    if cache_name not in results[prop_name]:
+                        results[prop_name][cache_name] = {}
+                    results[prop_name][cache_name][cache_size] = prop
+                print(cache_name, result)
         plot(dataset_name, results)
 
 if __name__=="__main__":

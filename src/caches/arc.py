@@ -1,4 +1,4 @@
-from collections import OrderedDict, defaultdict, deque
+from collections import OrderedDict
 from caches.cache import Cache
 import numpy as np
 
