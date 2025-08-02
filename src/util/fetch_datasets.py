@@ -1,70 +1,29 @@
 from itertools import chain
 import os
 import pickle
-import random
-import pandas as pd
 import numpy as np
-import tqdm
 from typing import *
 from datasets import load_dataset
 from sentence_transformers import SentenceTransformer
 from contextlib import contextmanager
 from tempfile import NamedTemporaryFile
+from datasets.combine import concatenate_datasets
+from scipy.cluster.hierarchy import DisjointSet
 
-embeds_dir = "datasets_text"
+embeds_dir = "datasets"
 
-# dataset specific params
-steam_full = False
-steam_limit = 100000
-steam_seed = 0
+models: Dict[str, SentenceTransformer] = {}
 
-models: Dict[str, SentenceTransformer] = dict()
-def embed_strings(strings: List[str], model_name='all-MiniLM-L6-v2'):
+def embed_strings(strings: List[str], model_name: str = "all-MiniLM-L6-v2") -> np.ndarray:
     if model_name not in models:
         models[model_name] = SentenceTransformer(model_name)
         print(f"Loaded model {model_name} into device {models[model_name].device}")
     model = models[model_name]
-    embeddings = model.encode(strings, convert_to_numpy=True, show_progress_bar=True)
-    return embeddings
-
-def skip_all_except(selected_rows: Iterable[int], *, show_progress: bool = True):
-    selected_rows = set(selected_rows)
-    sample_size = len(selected_rows)
-    if show_progress:
-        progress = tqdm.tqdm(total=sample_size)
-        def f(i):
-            if i in selected_rows:
-                progress.update(1)
-                return False
-            else:
-                return True
-    else:
-        def f(i):
-            return i not in selected_rows
-    return f
-
-def sample_from_csv(file_path: str, total_rows: int, sample_size: int, *, show_progress: bool = True, seed: int = None, header: Optional[int] = 0, names: Optional[Sequence[str]] = None, dtype: Optional[Dict] = None) -> pd.DataFrame:
-    if seed is not None:
-        random.seed(seed)
-    selected_rows = set(random.sample(range(1, total_rows), sample_size))
-    if isinstance(header, int):
-        assert header < total_rows, f"Header is {header} but total_rows is {total_rows}"
-        selected_rows.add(header)
-    else:
-        assert names is not None, f"Names must be provided if there is no header"
-    df = pd.read_csv(
-        file_path,
-        header=header,
-        names=names,
-        skiprows=skip_all_except(selected_rows, show_progress=show_progress),
-        nrows=len(selected_rows),
-        encoding_errors="ignore",
-        dtype=dtype,
-    )
-    return df
+    embs = model.encode(strings, convert_to_numpy=True, show_progress_bar=True)
+    return embs.astype(np.float16)  # space saver
 
 @contextmanager
-def writer(path):
+def writer(path: str):
     if os.path.exists(path):
         f = None
     else:
@@ -72,99 +31,167 @@ def writer(path):
         tmp_path = f.name
     try:
         yield f
-        f.close()  # Ensure the file is closed before renaming
-        os.rename(tmp_path, path)
+        if f is not None:
+            f.close()  # Ensure closed before rename
+            os.rename(tmp_path, path)
     except:
         if f is None:
-            print(f"Skipping \"{path}\" because it already exists")
+            print(f'Skipping "{path}" because it already exists')
         else:
             f.close()
             os.remove(tmp_path)
             raise
 
+def pack_and_dump(path: str, texts: List[str], meta: Dict[str, List[Any]], model_name: str = "all-MiniLM-L6-v2"):
+    assert all(len(v) == len(texts) for v in meta.values()), "Metadata length mismatch"
+    with writer(path) as f:
+        if f is None:
+            print(f'Skipping "{path}" because it already exists')
+            return
+        embeds = embed_strings(texts, model_name=model_name)
+        payload = {
+            "text": texts,
+            "embeds": embeds,
+            "meta": meta
+        }
+        pickle.dump(payload, f)
+
+def build_eli5() -> Tuple[List[str], Dict[str, List[Any]]]:
+    ds = load_dataset("sentence-transformers/eli5", trust_remote_code=True)
+    texts: List[str] = ds["train"]["question"]
+    meta = {
+    }
+    return texts, meta
+
+def build_wildchat() -> Tuple[List[str], Dict[str, List[Any]]]:
+    ds = load_dataset("allenai/WildChat-1M")
+    texts, session_id, turn_id = [], [], []
+    sid = 0
+    for ex in ds["train"]:
+        if ex.get("language") != "English":
+            continue
+        # Keep only user turns; preserve order
+        user_turns = []
+        for t in ex.get("conversation", []):
+            role = t.get("role") or t.get("author_role")  # robustness
+            if role in ("user", "User"):
+                content = t.get("content") or t.get("text")
+                if content:
+                    user_turns.append(content)
+        if not user_turns:
+            continue
+        for k, ut in enumerate(user_turns):
+            texts.append(ut)
+            session_id.append(f"wildchat_{sid}")
+            turn_id.append(k)
+        sid += 1
+    meta = {
+        "session_id": session_id,
+        "turn_id": turn_id,
+    }
+    return texts, meta
+
+def build_qrecc() -> Tuple[List[str], Dict[str, List[Any]]]:
+    ds = load_dataset("svakulenk0/qrecc")
+    texts, session_id, turn_id = [], [], []
+    # Fields: 'conversation_id' (or 'qid_conv'), 'turn_id' (or 'turn'), 'question'
+    for split in ("train", "validation", "test"):
+        if split not in ds:
+            continue
+        for ex in ds[split]:
+            q = ex.get("question") or ex.get("rewritten_question") or ex.get("raw_question")
+            if not q:
+                continue
+            cid = ex.get("conversation_id") or ex.get("qid_conv") or ex.get("conversation_no") or "unk"
+            tid = ex.get("turn_id") or ex.get("turn") or 0
+            texts.append(q)
+            session_id.append(f"qrecc_{cid}")
+            turn_id.append(int(tid))
+    # Sort by (session, turn) to preserve order
+    order = sorted(range(len(texts)), key=lambda i: (session_id[i], turn_id[i]))
+    texts = [texts[i] for i in order]
+    session_id = [session_id[i] for i in order]
+    turn_id = [turn_id[i] for i in order]
+    meta = {
+        "dataset": ["QReCC"] * len(texts),
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "language": ["en"] * len(texts),
+        "timestamp": [None] * len(texts),
+        "pair_id": [None] * len(texts),
+    }
+    return texts, meta
+
+def build_stackoverflow() -> Tuple[List[str], Dict[str, List[Any]]]:
+    ds = load_dataset("pacovaldez/stackoverflow-questions")
+    # Can also get the questions themselves
+    texts = concatenate_datasets([ds[s] for s in ('train','validation','test')])['title']
+    return texts, meta
+
+def build_quora() -> Tuple[List[str], Dict[str, List[Any]]]:
+    ds = load_dataset("quora", trust_remote_code=True)
+    # structure: each row has 'questions': [{'text': q1}, {'text': q2}], possibly 'id'
+    texts, question_id = [], []
+    union_find = DisjointSet()
+    for ex in ds["train"]:
+        q1, q2 = ex['questions']['text']
+        q1_id, q2_id = ex['questions']['id']
+        union_find.add(q1_id)
+        union_find.add(q2_id)
+        if ex['is_duplicate']:
+            union_find.merge(q1_id, q2_id)
+        texts += [q1, q2]
+        question_id += [q1_id, q2_id]
+    set_id = [union_find[qid] for qid in question_id]
+    meta = {
+        "set_id": set_id,
+        "question_id": question_id
+    }
+    return texts, meta
+
+def build_nq() -> Tuple[List[str], Dict[str, List[Any]]]:
+    texts = []
+    ds = load_dataset("nq_open")
+    for split in ("train", "validation"):
+        texts.extend([q for q in ds[split]["question"] if q])
+    meta = {
+    }
+    return texts, meta
+
+def build_msmarco() -> Tuple[List[str], Dict[str, List[Any]]]:
+    texts = []
+    ds = load_dataset("ms_marco", "v2.1")
+    for split in ("train", "validation", "test"):
+        texts.extend([q for q in ds[split]["query"] if q])
+    meta = {
+    }
+    return texts, meta
+
 if __name__ == "__main__":
-    print("generating bing...")
-    with writer(os.path.join(embeds_dir, "embeds_bing.pkl")) as f:
-        if f is not None:
-            ds_bing = load_dataset("corbyrosset/researchy_questions")
-            questions_bing = ds_bing['train']['question']
-            embeds_bing = embed_strings(questions_bing)
-            pickle.dump({"text": questions_bing, "embeds": embeds_bing}, f)
-    
-    print("generating ComQA...")
-    with writer(os.path.join(embeds_dir, "embeds_ComQA.pkl")) as f:
-        if f is not None:
-            ds_ComQA = load_dataset("dbiton/ComQA")
-            questions_ComQA = ds_ComQA['train']['text']
-            embeds_ComQA = embed_strings(questions_ComQA)
-            pickle.dump({"text": questions_ComQA, "embeds": embeds_ComQA}, f)
+    os.makedirs(embeds_dir, exist_ok=True)
 
-    print("generating so...")
-    with writer(os.path.join(embeds_dir, "embeds_so.pkl")) as f:
-        if f is not None:
-            ds_so = load_dataset("pacovaldez/stackoverflow-questions")
-            questions_so = ds_so['train']['title']
-            embeds_so = embed_strings(questions_so)
-            pickle.dump({"text": questions_so, "embeds": embeds_so}, f)
+    print("generating ELI5...") #V
+    texts, meta = build_eli5()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_eli5.pkl"), texts, meta)
 
-    print("generating chat...")
-    with writer(os.path.join(embeds_dir, "embeds_chat.pkl")) as f:
-        if f is not None:
-            ds_chat = load_dataset("allenai/WildChat-1M")
-            questions_chat = [e['conversation'][0]['content'] for e in ds_chat['train'] if e['language'] == "English"]
-            embeds_chat = embed_strings(questions_chat)
-            pickle.dump({"text": questions_chat, "embeds": embeds_chat}, f)
-    
-    print("generating OpenAssistant...")
-    with writer(os.path.join(embeds_dir, "embeds_oasst.pkl")) as f:
-        if f is not None:
-            ds_oasst = load_dataset("OpenAssistant/oasst1")
-            questions_oasst = [v['text'] for v in ds_oasst['train'] if v['lang'] == 'en' and v['role'] == 'prompter']
-            embeds_oasst = embed_strings(questions_oasst)
-            pickle.dump({"text": questions_oasst, "embeds": embeds_oasst}, f)
+    print("generating WildChat...") #V
+    texts, meta = build_wildchat()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_wildchat.pkl"), texts, meta)
 
-    print("generating PersonaChat-like (BlenderBot distill)...")
-    with writer(os.path.join(embeds_dir, "embeds_persona.pkl")) as f:
-        if f is not None:
-            ds_persona = load_dataset("AlekseyKorshuk/persona-chat")
-            questions_lists = [v[-1]['history'] for v in ds_persona['train']['utterances']]
-            questions = list(chain.from_iterable(questions_lists))
-            embeds_persona = embed_strings(questions)
-            pickle.dump({"text": questions, "embeds": embeds_persona}, f)
+    print("generating Natural Questions...") #V
+    texts, meta = build_nq()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_nq.pkl"), texts, meta)
 
-    print("generating Quora...")
-    with writer(os.path.join(embeds_dir, "embeds_quora.pkl")) as f:
-        if f is not None:
-            ds_quora = load_dataset("quora", trust_remote_code=True)
-            question_pairs = [v['text'] for v in ds_quora['train']['questions']]
-            questions = list(chain.from_iterable(question_pairs))
-            embeds_quora = embed_strings(questions)
-            pickle.dump({"text": questions, "embeds": embeds_quora}, f)
-    
-    '''
-    if steam_full:
-        print("generating steam...")
-        with writer(os.path.join(embeds_dir, f"embeds_steam_{steam_limit}_{steam_seed}.parquet")) as f:
-            if f is not None:
-                import kagglehub
-                print(f"Downloading dataset if needed... This can take a long time if the raw dataset has not been downloaded!")
-                path = kagglehub.dataset_download("kieranpoc/steam-reviews/versions/2")
-                print(f"Dataset is available at {path}")
-                csv_path = os.path.join(path, "all_reviews", "all_reviews.csv")
-                print(f"Sampling from full: {csv_path}")
-                df = sample_from_csv(csv_path, 113883709, steam_limit, seed=steam_seed)
-                df = df[["timestamp_created","appid","review"]]
-                df.sort_values("timestamp_created", inplace=True)
-                df.reset_index(drop=True, inplace=True)
-                reviews_steam = df['review']
-                embeds_steam = embed_strings(reviews_steam)
-                df["embed"] = embeds_steam.tolist()
-                pd.DataFrame(df).to_parquet(f)
-    else:
-        print("loading steam...")
-        with writer(os.path.join(embeds_dir, "embeds_steam.pkl")) as f:
-            if f is not None:
-                ds_steam = load_dataset("alongoldenberg/steam-reviews")
-                embeds_steam = np.array(ds_steam['train']['embed'])
-                pickle.dump(embeds_steam, f)
-    '''
+    print("generating MS MARCO...") #V
+    texts, meta = build_msmarco()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_msmarco.pkl"), texts, meta)
+
+    print("generating StackOverflow...") #V
+    texts, meta = build_stackoverflow()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_stackoverflow.pkl"), texts, meta)
+
+    print("generating Quora Question Pairs...") #V
+    texts, meta = build_quora()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_quora_qp.pkl"), texts, meta)
+
+    print("Done.")
