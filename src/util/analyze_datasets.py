@@ -79,9 +79,12 @@ def calculate_entropy_of_principal_components(embeddings):
     return pca_entropy
 
 datasets_paths = {
-    "Bing": "datasets/embeds_bing.pkl", 
-    "StackOverflow": "datasets/embeds_so.pkl", 
-    "WildChat": "datasets/embeds_chat.pkl"
+    "MsMarco": "C:/Projects/DimCache/datasets/embeds_msmarco.pkl",
+    "WildChat": "C:/Projects/DimCache/datasets/embeds_wildchat.pkl",
+    "ELI5": "C:/Projects/DimCache/datasets/embeds_eli5.pkl",
+    "NaturalQuestions": "C:/Projects/DimCache/datasets/embeds_nq.pkl",
+    "StackOverflow": "C:/Projects/DimCache/datasets/embeds_stackoverflow.pkl",
+    "Quora": "C:/Projects/DimCache/datasets/embeds_quora_qp.pkl",
 }
 
 results = {}
@@ -89,14 +92,15 @@ results = {}
 # Calculate metrics and store them
 for dataset_name, file_path in datasets_paths.items():
     with open(file_path, "rb") as f:
-        embeds = pickle.load(f)
+        data = pickle.load(f)
 
     # Use a subset of embeddings if needed
-    embeds = embeds[:1000]
+    embeds = data['embeds'][:10000]
+    texts = data['text'][:10000]
     print(dataset_name)
-    plot_pca(embeds, f"{dataset_name}_pca.png")
-    plot_tsne(embeds, f"{dataset_name}_tsne.png")
-    continue
+    #plot_pca(embeds, f"{dataset_name}_pca.png")
+    #plot_tsne(embeds, f"{dataset_name}_tsne.png")
+
     # Calculate the pairwise statistics
     cs_mean, cs_std, ed_mean, ed_std = calculate_pairwise_statistics(embeds)
     

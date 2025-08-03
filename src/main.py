@@ -1,5 +1,6 @@
 import sys
 from concurrent.futures._base import as_completed
+from typing import List, Dict
 sys.path.append(".")
 
 from concurrent.futures import ProcessPoolExecutor
@@ -24,18 +25,21 @@ from caches.lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
 from src.util.reduce_dim import reduce_dim
 
 dataset_filenames = {
-    "WildChat": "datasets/embeds_chat.pkl",
-    "Bing": "datasets/embeds_bing.pkl",
-    "StackOverflow": "datasets/embeds_so.pkl",
-    "ComQA": "datasets/embeds_ComQA.pkl",
-    "persona": "datasets/embeds_persona.pkl",
-    "quora": "datasets/embeds_quora.pkl",
-    "OAsst": "datasets/embeds_oasst.pkl",
-    # "Steam": "datasets/embeds_steam.pkl",
+    "MsMarco": "datasets/embeds_msmarco.pkl",
+    "WildChat": "datasets/embeds_wildchat.pkl",
+    "ELI5": "datasets/embeds_eli5.pkl",
+    "NaturalQuestions": "datasets/embeds_nq.pkl",
+    "StackOverflow": "datasets/embeds_stackoverflow.pkl",
+    "Quora": "datasets/embeds_quora_qp.pkl",
 }
 
 has_gpu = False
-NUM_PROCS = 4
+NUM_PROCS = 1
+
+def get_metrics(embeds: List[np.ndarray], texts: List[str]) -> Dict[str, float]:
+    metrics = {}
+    metrics['size'] = len(embeds)
+    return metrics
 
 def plot(dataset_name, results):
     for prop_name, prop_results in results.items():
@@ -54,7 +58,7 @@ def plot(dataset_name, results):
         plt.grid(True)
         plt.tight_layout()
         figures_dir = "figures"
-        plt.savefig(os.path.join(figures_dir, f"{dataset_name}_{prop_name}.png"))
+        plt.savefig(os.path.join(figures_dir, f"{prop_name}_{dataset_name}.png"))
 
 def load_embeds():
     for dataset_name, path in dataset_filenames.items():
@@ -69,57 +73,95 @@ def yield_batches_indices(total_size, batch_size):
     for i in range(0, total_size, batch_size):
         yield list(range(i, min(i+batch_size, total_size)))
 
-# NOTE: this assumes count_nn and batch_size is 1!
+import numpy as np
+import time
+import faiss
+
 def process(args):
-    (cache_tuple, cache_size, dim, total_embeds, total_embeds_texts, cache_name, batch_size, count_nn) = args
-    assert(count_nn == 1)
-    assert(batch_size == 1)
+    (
+        cache_tuple,          # (constructor, *args)
+        cache_size,
+        dim,
+        total_embeds,
+        total_embeds_texts,
+        cache_name,
+        batch_size,
+        count_nn
+    ) = args
+
+    assert batch_size == 1  # code assumes one query per batch
+
+    # Initialize cache
     index = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
     cache_constructor = cache_tuple[0]
     cache_args = cache_tuple[1:]
     cache = cache_constructor(*cache_args)
     cache.initialize(cache_size, index)
-    cache_hits = 0
+
+    # Runtime bookkeeping
     t0 = time.time()
-    
     runtime_per_l1 = 1
     runtime_per_l2 = 10
     runtime_per_llm = 100
-    
     runtime = 0
+
+    # Stats
+    total_queries = 0
+    total_hits = 0
+    at_least_1_hits = 0
+    
+    # Unlimited fallback index
     index_unlimited = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
+
     for i_embeds in yield_batches_indices(len(total_embeds), batch_size):
-        embeds_texts = total_embeds_texts[i_embeds]
         embeds = total_embeds[i_embeds]
+        embeds_texts = total_embeds_texts[i_embeds]
+
+        # Cache lookup
         iter_cache_hits, evicted_embeds_ids = cache.request(embeds, i_embeds, count_nn, embeds_texts)
+        # iter_cache_hits: shape (batch_size,), each entry ∈ [0, count_nn]
+
         runtime += runtime_per_l1
-        iter_cache_hits_count = np.count_nonzero(iter_cache_hits)
-        cache_hits += iter_cache_hits_count
-        expected_results_count = count_nn * len(i_embeds)
-        if iter_cache_hits_count != expected_results_count:
+        total_queries += len(i_embeds) * count_nn
+        total_hits += np.sum(iter_cache_hits)
+        at_least_1_hits += np.any(iter_cache_hits)
+
+        # L2/LLM fallback for total misses
+        if np.any(iter_cache_hits == 0):
             runtime += runtime_per_l2
-            i_embeds_cache_misses = np.where(iter_cache_hits == 0)[0] + min(i_embeds)
-            batch_embeds_misses = total_embeds[i_embeds_cache_misses]
-            distances_sqrd, neighbors = index_unlimited.search(batch_embeds_misses, 1)
-            hits_count = np.count_nonzero(np.where(distances_sqrd <= cache.same_embed_distance**2))
-            if hits_count == 0:
-                runtime += runtime_per_llm
+
+            miss_indices = np.array(i_embeds)[iter_cache_hits == 0]
+            batch_embeds_misses = total_embeds[miss_indices]
+
+            distances_sqrd, _ = index_unlimited.search(batch_embeds_misses, 1)
+            count_found = np.count_nonzero(distances_sqrd <= cache.same_embed_distance ** 2)
+            count_missing = len(batch_embeds_misses) - count_found
+            runtime += runtime_per_llm * count_missing
+
+        # Update fallback index
         if len(evicted_embeds_ids) > 0:
-            evicted_embed = total_embeds[evicted_embeds_ids]
-            index_unlimited.add_with_ids(evicted_embed, np.array(evicted_embeds_ids))
+            evicted_vectors = total_embeds[evicted_embeds_ids]
+            index_unlimited.add_with_ids(evicted_vectors, np.array(evicted_embeds_ids))
+
+    fractional_recall_at_k = total_hits / (total_queries * count_nn)
+    binary_recall_at_k = at_least_1_hits / total_queries
+
     iter_results = {
         "Sim. Runtime": runtime,
         "Cache Name": cache_name,
-        "Hit Ratio": cache_hits / len(total_embeds),
+        "Recall@K": fractional_recall_at_k,
+        "AtLeast1@K": binary_recall_at_k,
         "Runtime": time.time() - t0,
         "Cache Size": cache_size
     }
+
     return iter_results
+
 
 def main():
     batch_size = 1
-    count_nn = 1
-    num_samples = 1000
+    count_nn = 10
+    num_samples = 10000
     MAX_CACHE_SIZE = 0.1
     COUNT_STEPS = 10
     dim = 384

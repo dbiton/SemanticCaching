@@ -56,7 +56,7 @@ class Dummy(Cache):
 
     def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         shape = (len(embeds),)
-        return np.zeros(shape, dtype=bool), embeds_ids
+        return np.zeros(shape, dtype=int), embeds_ids
 
 
 class RR(Cache):
