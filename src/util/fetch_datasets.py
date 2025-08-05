@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from tempfile import NamedTemporaryFile
 from datasets.combine import concatenate_datasets
 from scipy.cluster.hierarchy import DisjointSet
+from sklearn.preprocessing import normalize
 
 embeds_dir = "datasets"
 
@@ -20,7 +21,7 @@ def embed_strings(strings: List[str], model_name: str = "all-MiniLM-L6-v2") -> n
         print(f"Loaded model {model_name} into device {models[model_name].device}")
     model = models[model_name]
     embs = model.encode(strings, convert_to_numpy=True, show_progress_bar=True)
-    return embs.astype(np.float16)  # space saver
+    return normalize(embs)
 
 @contextmanager
 def writer(path: str):
