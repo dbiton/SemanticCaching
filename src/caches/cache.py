@@ -171,6 +171,47 @@ class LFU(Cache):
             self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
+class SurprisalLFU(Cache):
+    def __init__(self, same_embed_distance):
+        super().__init__(same_embed_distance)
+
+    def initialize(self, capacity: int, index):
+        # Use a dict mapping embed_id -> frequency (access count)
+        self.items = {}
+        super().initialize(capacity, index)
+
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.count_nonzero(mask, axis=1)
+        evicted_items = []
+        additions_embeds = []
+        additions_ids = []
+        count_remove = max(0, (len(embeds) + self.size()) - self.capacity)
+        for i_embed, i_nn in zip(*cache_hits_indices):
+            cand = closest_ids[i_embed][i_nn]
+            self.items[cand][0] += 1
+
+        needed_space = len(embeds)
+        current_size = self.size()
+        count_remove = max(0, (current_size + needed_space) - self.capacity)
+        if count_remove > 0:
+            least_used = heapq.nsmallest(count_remove, self.items.items(), key=lambda x: x[1])
+            for embed_id, _ in least_used:
+                del self.items[embed_id]
+                evicted_items.append(embed_id)
+
+        for embed_id, embed, embed_text in zip(embeds_ids, embeds, texts):
+            self.items[embed_id] = [0, -calculate_surprisal(embed_text)]
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
+        if evicted_items:
+            self.index.remove_ids(np.array(evicted_items))
+        if additions_ids:
+            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        return cache_hits, evicted_items
+
 class SimpleCache(Cache):
     def __init__(self, same_embed_distance):
         super().__init__(same_embed_distance)

@@ -1,6 +1,7 @@
 import sys
 from concurrent.futures._base import as_completed
 from typing import List, Dict
+from concurrent.futures.thread import ThreadPoolExecutor
 sys.path.append(".")
 
 from concurrent.futures import ProcessPoolExecutor
@@ -25,16 +26,16 @@ from caches.lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
 from src.util.reduce_dim import reduce_dim
 
 dataset_filenames = {
-    "MsMarco": "datasets/embeds_msmarco.pkl",
     "WildChat": "datasets/embeds_wildchat.pkl",
+    "Quora": "datasets/embeds_quora_qp.pkl",
+    "StackOverflow": "datasets/embeds_stackoverflow.pkl",
     "ELI5": "datasets/embeds_eli5.pkl",
     "NaturalQuestions": "datasets/embeds_nq.pkl",
-    "StackOverflow": "datasets/embeds_stackoverflow.pkl",
-    "Quora": "datasets/embeds_quora_qp.pkl",
+    "MsMarco": "datasets/embeds_msmarco.pkl",
 }
 
 has_gpu = False
-NUM_PROCS = 1
+NUM_PROCS = 4
 
 def get_metrics(embeds: List[np.ndarray], texts: List[str]) -> Dict[str, float]:
     metrics = {}
@@ -106,7 +107,6 @@ def process(args):
     runtime = 0
 
     # Stats
-    total_queries = 0
     total_hits = 0
     at_least_1_hits = 0
     
@@ -122,7 +122,6 @@ def process(args):
         # iter_cache_hits: shape (batch_size,), each entry ∈ [0, count_nn]
 
         runtime += runtime_per_l1
-        total_queries += len(i_embeds) * count_nn
         total_hits += np.sum(iter_cache_hits)
         at_least_1_hits += np.any(iter_cache_hits)
 
@@ -134,7 +133,8 @@ def process(args):
             batch_embeds_misses = total_embeds[miss_indices]
 
             distances_sqrd, _ = index_unlimited.search(batch_embeds_misses, 1)
-            count_found = np.count_nonzero(distances_sqrd <= cache.same_embed_distance ** 2)
+            distances = np.sqrt(distances_sqrd)
+            count_found = np.count_nonzero(distances <= cache.same_embed_distance)
             count_missing = len(batch_embeds_misses) - count_found
             runtime += runtime_per_llm * count_missing
 
@@ -143,8 +143,8 @@ def process(args):
             evicted_vectors = total_embeds[evicted_embeds_ids]
             index_unlimited.add_with_ids(evicted_vectors, np.array(evicted_embeds_ids))
 
-    fractional_recall_at_k = total_hits / (total_queries * count_nn)
-    binary_recall_at_k = at_least_1_hits / total_queries
+    fractional_recall_at_k = total_hits / (len(total_embeds) * count_nn)
+    binary_recall_at_k = at_least_1_hits / len(total_embeds)
 
     iter_results = {
         "Sim. Runtime": runtime,
@@ -161,11 +161,11 @@ def process(args):
 def main():
     batch_size = 1
     count_nn = 10
-    num_samples = 10000
+    num_samples = 30000
     MAX_CACHE_SIZE = 0.1
     COUNT_STEPS = 10
     dim = 384
-    same_embed_distance = .75
+    same_embed_distance = 1
     for dataset_name, data in load_embeds():
         print(f"loaded {dataset_name} with {len(data['embeds'])} examples...")
         indices = list(range(num_samples))
@@ -174,7 +174,8 @@ def main():
         print("loaded!")
         caches = {
             #"ClusterOPT": ClusterOPT(same_embed_distance, embeds_actual),
-            
+            "SurprisalLFU": (SurprisalLFU, same_embed_distance),
+            "Surprisal": (Surprisal, same_embed_distance),
             "LFU": (LFU, same_embed_distance),
             "LRU": (LRU, same_embed_distance),
             "LRUK": (LRUK, same_embed_distance, 2),            
@@ -196,7 +197,8 @@ def main():
         num_batches = len(caches) * COUNT_STEPS
         pbar = tqdm.tqdm(total=num_batches, desc=f"Processing {dataset_name} with {num_batches} batches")
         results = {}
-        with ProcessPoolExecutor(NUM_PROCS) as executor:
+        Pool = ProcessPoolExecutor if NUM_PROCS > 1 else ThreadPoolExecutor
+        with Pool(NUM_PROCS) as executor:
             futures = [executor.submit(process, arg) for arg in args]
             for future in as_completed(futures):
                 result = future.result()
