@@ -2,6 +2,7 @@ import sys
 from concurrent.futures._base import as_completed
 from typing import List, Dict
 from concurrent.futures.thread import ThreadPoolExecutor
+from util.faiss_hnsw_delete_wrapper import DeletesOnlyWrapper
 sys.path.append(".")
 
 from concurrent.futures import ProcessPoolExecutor
@@ -23,7 +24,8 @@ from caches.lru_k import LRUK
 from caches.OPT import RelaxedLearnedOPT, RelaxedOPT, OPT, ClusterOPT,\
     ClusterRelaxedOPT
 from caches.lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
-from src.util.reduce_dim import reduce_dim
+from util.reduce_dim import reduce_dim
+from util.faiss_like_hnsw import FaissLikeHNSW
 
 dataset_filenames = {
     "WildChat": "datasets/embeds_wildchat.pkl",
@@ -34,8 +36,7 @@ dataset_filenames = {
     "MsMarco": "datasets/embeds_msmarco.pkl",
 }
 
-has_gpu = False
-NUM_PROCS = 4
+NUM_PROCS = 1
 
 def get_metrics(embeds: List[np.ndarray], texts: List[str]) -> Dict[str, float]:
     metrics = {}
@@ -78,8 +79,11 @@ import numpy as np
 import time
 import faiss
 
+
 def process(args):
     (
+        index_name,
+        index_constr,
         cache_tuple,          # (constructor, *args)
         cache_size,
         dim,
@@ -87,13 +91,13 @@ def process(args):
         total_embeds_texts,
         cache_name,
         batch_size,
-        count_nn
+        count_nn,
     ) = args
 
+    index = index_constr()
     assert batch_size == 1  # code assumes one query per batch
 
     # Initialize cache
-    index = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
     cache_constructor = cache_tuple[0]
     cache_args = cache_tuple[1:]
     cache = cache_constructor(*cache_args)
@@ -111,7 +115,7 @@ def process(args):
     at_least_1_hits = 0
     
     # Unlimited fallback index
-    index_unlimited = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
+    index_unlimited = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
 
     for i_embeds in yield_batches_indices(len(total_embeds), batch_size):
         embeds = total_embeds[i_embeds]
@@ -147,6 +151,7 @@ def process(args):
     binary_recall_at_k = at_least_1_hits / len(total_embeds)
 
     iter_results = {
+        "Index": index_name,
         "Sim. Runtime": runtime,
         "Cache Name": cache_name,
         "Recall@K": fractional_recall_at_k,
@@ -158,43 +163,69 @@ def process(args):
     return iter_results
 
 
+def get_hnsw_index():
+    d, M = 384, 32
+    base = faiss.IndexHNSWFlat(d, M)
+    idmap = faiss.IndexIDMap2(base)
+    hnsw_index = DeletesOnlyWrapper(idmap)
+    return hnsw_index
+
+def get_flat_index():
+    dim = 384
+    return faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
+
 def main():
     batch_size = 1
-    count_nn = 10
-    num_samples = 30000
-    MAX_CACHE_SIZE = 0.1
-    COUNT_STEPS = 10
+    count_nn = 1
+    num_samples = 10000
+    MAX_CACHE_SIZE = 0.25
+    COUNT_STEPS = 5
     dim = 384
-    same_embed_distance = 1
+    same_embed_distance = .75
     for dataset_name, data in load_embeds():
         print(f"loaded {dataset_name} with {len(data['embeds'])} examples...")
         indices = list(range(num_samples))
         embeds_texts = np.array([data['text'][i] for i in indices])
-        embeds = reduce_dim(np.array([data['embeds'][i] for i in indices]), dim)
+        embeds = reduce_dim(np.array([data['embeds'][i] for i in indices]), dim).astype(np.float32)
         print("loaded!")
         caches = {
-            #"ClusterOPT": ClusterOPT(same_embed_distance, embeds_actual),
-            "SurprisalLFU": (SurprisalLFU, same_embed_distance),
-            "Surprisal": (Surprisal, same_embed_distance),
+            #"NaiveRVB": (OPT, same_embed_distance, embeds),
+            #"ClusterRVB": (ClusterOPT, same_embed_distance, embeds),
+            #"SurprisalLFU": (SurprisalLFU, same_embed_distance),
+            #"Surprisal": (Surprisal, same_embed_distance),
             "LFU": (LFU, same_embed_distance),
-            "LRU": (LRU, same_embed_distance),
-            "LRUK": (LRUK, same_embed_distance, 2),            
-            "DALFU": (DynamicAgingLFU, same_embed_distance, 32),
-            "ARC": (ARC, same_embed_distance),
-            "ClusterLRU": (ClusterLRU, same_embed_distance),
-            "ClusterLFU": (ClusterLFU, same_embed_distance),
-            "DistanceLFU": (DistanceLFU, same_embed_distance),
-            "RAP": (RAP, same_embed_distance),
-            "SphereLFU": (SphereQueryLFU, same_embed_distance),
+            #"LRU": (LRU, same_embed_distance),
+            #"LRUK": (LRUK, same_embed_distance, 2),            
+            #"DALFU": (DynamicAgingLFU, same_embed_distance, 32),
+            #"ARC": (ARC, same_embed_distance),
+            #"ClusterLRU": (ClusterLRU, same_embed_distance),
+            #"ClusterLFU": (ClusterLFU, same_embed_distance),
+            #"DistanceLFU": (DistanceLFU, same_embed_distance),
+            #"RAP": (RAP, same_embed_distance),
+            #"SphereLFU": (SphereQueryLFU, same_embed_distance),
         }
 
+        # IVF needs a coarse quantizer
+        nlist = 10  # number of Voronoi cells
+        coarse_quantizer = faiss.IndexFlatL2(dim)
+        ivf_index = faiss.IndexIVFFlat(coarse_quantizer, dim, nlist)
+        train_embeds = embeds[:5000]
+        ivf_index.train(train_embeds)
+        
+        faiss_indices = {
+            "hnsw": get_hnsw_index,
+            #"ivf": faiss.IndexIDMap2(ivf_index),
+            "flat": get_flat_index,
+        }
+        
         args = []
         for cache_name, create_cache_args in caches.items():
             step_size = int(num_samples * MAX_CACHE_SIZE // COUNT_STEPS)
-            for cache_size in range(step_size, int(num_samples * MAX_CACHE_SIZE), step_size):
-                args.append((create_cache_args, cache_size, dim, embeds, embeds_texts, cache_name, batch_size, count_nn))
+            for faiss_index_name, faiss_index in faiss_indices.items():
+                for cache_size in range(step_size, int(num_samples * MAX_CACHE_SIZE), step_size):
+                    args.append((faiss_index_name, faiss_index, create_cache_args, cache_size, dim, embeds, embeds_texts, cache_name, batch_size, count_nn))
         
-        num_batches = len(caches) * COUNT_STEPS
+        num_batches = len(caches) * COUNT_STEPS * len(faiss_indices)
         pbar = tqdm.tqdm(total=num_batches, desc=f"Processing {dataset_name} with {num_batches} batches")
         results = {}
         Pool = ProcessPoolExecutor if NUM_PROCS > 1 else ThreadPoolExecutor
@@ -204,7 +235,9 @@ def main():
                 result = future.result()
                 pbar.update(1)
                 for prop_name, prop in result.items():
-                    cache_name = result['Cache Name']
+                    _cache_name = result['Cache Name']
+                    cache_index = result['Index']
+                    cache_name = f"{_cache_name}_{cache_index}"
                     cache_size = result['Cache Size']
                     if prop_name == 'Cache Name':
                         continue
