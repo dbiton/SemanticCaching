@@ -36,7 +36,7 @@ dataset_filenames = {
     "MsMarco": "datasets/embeds_msmarco.pkl",
 }
 
-NUM_PROCS = 1
+NUM_PROCS = 2
 
 def get_metrics(embeds: List[np.ndarray], texts: List[str]) -> Dict[str, float]:
     metrics = {}
@@ -62,14 +62,15 @@ def plot(dataset_name, results):
         figures_dir = "figures"
         plt.savefig(os.path.join(figures_dir, f"{prop_name}_{dataset_name}.png"))
 
-def load_embeds():
-    for dataset_name, path in dataset_filenames.items():
-        if not os.path.exists(path):
-            print(f"Skipping \"{path}\" because it does not exist")
-            continue
-        with open(path, "rb") as f:
-            embeds = pickle.load(f)
-            yield dataset_name, embeds
+def get_embeds_paths():
+    return list(dataset_filenames.items())
+
+def load_embeds(path: str, N: int):
+    with open(path, "rb") as f:
+        data = pickle.load(f)
+    embeds_texts = np.array([data['text'][i] for i in range(N)])
+    embeds = np.array([data['embeds'][i] for i in range(N)]).astype(np.float32)
+    return embeds, embeds_texts
 
 def yield_batches_indices(total_size, batch_size):
     for i in range(0, total_size, batch_size):
@@ -85,15 +86,17 @@ def process(args):
         index_name,
         index_constr,
         cache_tuple,          # (constructor, *args)
+        stream_size,
         cache_size,
         dim,
-        total_embeds,
-        total_embeds_texts,
+        dataset_path,
         cache_name,
         batch_size,
         count_nn,
     ) = args
 
+    total_embeds, total_embeds_texts = load_embeds(dataset_path, stream_size)
+    
     index = index_constr()
     assert batch_size == 1  # code assumes one query per batch
 
@@ -177,16 +180,17 @@ def get_flat_index():
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 10000
+    num_samples = 100000
     MAX_CACHE_SIZE = 0.25
-    COUNT_STEPS = 5
+    COUNT_STEPS = 3
     dim = 384
     same_embed_distance = .75
-    for dataset_name, data in load_embeds():
-        print(f"loaded {dataset_name} with {len(data['embeds'])} examples...")
-        indices = list(range(num_samples))
-        embeds_texts = np.array([data['text'][i] for i in indices])
-        embeds = reduce_dim(np.array([data['embeds'][i] for i in indices]), dim).astype(np.float32)
+    for dataset_name, dataset_path in get_embeds_paths():
+        print(f"processing {dataset_name}")
+        # indices = list(range(num_samples))
+        # embeds_texts = np.array([data['text'][i] for i in indices])
+        # embeds = reduce_dim(np.array([data['embeds'][i] for i in indices]), dim).astype(np.float32)
+        
         print("loaded!")
         caches = {
             #"NaiveRVB": (OPT, same_embed_distance, embeds),
@@ -204,13 +208,6 @@ def main():
             #"RAP": (RAP, same_embed_distance),
             #"SphereLFU": (SphereQueryLFU, same_embed_distance),
         }
-
-        # IVF needs a coarse quantizer
-        nlist = 10  # number of Voronoi cells
-        coarse_quantizer = faiss.IndexFlatL2(dim)
-        ivf_index = faiss.IndexIVFFlat(coarse_quantizer, dim, nlist)
-        train_embeds = embeds[:5000]
-        ivf_index.train(train_embeds)
         
         faiss_indices = {
             "hnsw": get_hnsw_index,
@@ -223,10 +220,10 @@ def main():
             step_size = int(num_samples * MAX_CACHE_SIZE // COUNT_STEPS)
             for faiss_index_name, faiss_index in faiss_indices.items():
                 for cache_size in range(step_size, int(num_samples * MAX_CACHE_SIZE), step_size):
-                    args.append((faiss_index_name, faiss_index, create_cache_args, cache_size, dim, embeds, embeds_texts, cache_name, batch_size, count_nn))
+                    args.append((faiss_index_name, faiss_index, create_cache_args, num_samples, cache_size, dim, dataset_path, cache_name, batch_size, count_nn))
         
         num_batches = len(caches) * COUNT_STEPS * len(faiss_indices)
-        pbar = tqdm.tqdm(total=num_batches, desc=f"Processing {dataset_name} with {num_batches} batches")
+        pbar = tqdm.tqdm(total=num_batches, desc=f"Processing {dataset_name}'s {num_batches} batches")
         results = {}
         Pool = ProcessPoolExecutor if NUM_PROCS > 1 else ThreadPoolExecutor
         with Pool(NUM_PROCS) as executor:
