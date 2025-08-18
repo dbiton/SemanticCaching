@@ -27,41 +27,49 @@ class VectorStore:
         uri: str = "http://localhost:19530",
         collection_name: str = "vectors",
         dim: int = 384,
-        metric_type: str = "L2",  # or "IP"/"COSINE"
+        metric_type: str = "L2",
         index_type: str = "FLAT",
-        index_params: Optional[Dict] = None,
-        drop_if_exists: bool = False,
-        auto_id: bool = False,
-        id_type = DataType.INT64,
-        vector_field_name: str = "vector",
-        id_field_name: str = "id",
-        description: str = "",
-        load_on_init: bool = True,
-        sync_index_build: bool = True,
+        index_params: dict = None
     ):
-        self.client = MilvusClient(uri=uri)
-        self.collection = collection_name
-        self.dim = int(dim)
+        self.collection_name = collection_name
+        self.index_type = index_type
         self.metric_type = metric_type
-        self.index_type = index_type.upper()
-        self.vector_field_name = vector_field_name
-        self.id_field_name = id_field_name
-        self.auto_id = bool(auto_id)
-        self._loaded = False
-
-        if drop_if_exists and self.client.has_collection(self.collection):
-            self.client.drop_collection(self.collection)
-
-        if not self.client.has_collection(self.collection):
-            self._create_collection(id_type=id_type, description=description)
-
-        # (Re)create index if needed
+        self.id_field_name = "id"
+        self.vector_field_name = "vector"
+        self.index_name = "index"
+        self.client = MilvusClient(uri=uri)
+        
+        if self.client.has_collection(self.collection_name):
+            self.client.drop_collection(self.collection_name)
+        
+        schema = MilvusClient.create_schema(
+            auto_id=False,
+            enable_dynamic_field=True
+        )
+        schema.add_field(field_name=self.id_field_name, datatype=DataType.INT64, is_primary=True)
+        schema.add_field(field_name=self.vector_field_name, datatype=DataType.FLOAT_VECTOR, dim=dim)
+        self.client.create_collection(
+            collection_name=self.collection_name, 
+            schema=schema,
+        )
+        
         if index_params is None:
-            index_params = self._default_index_params(self.index_type)
-        self._ensure_index(index_type=self.index_type, index_params=index_params, sync=sync_index_build)
-
-        if load_on_init:
-            self.load()
+            index_params = self._default_index_params(index_type)
+        
+        _index_params = MilvusClient.prepare_index_params()
+        _index_params.add_index(
+            field_name=self.vector_field_name,
+            metric_type=metric_type,
+            index_type=index_type,
+            index_name=self.index_name,
+            params=index_params
+        )
+        self.client.create_index(
+            collection_name=collection_name,
+            index_params=_index_params,
+            sync=True
+        )
+        self.load()
 
     # ----------------------- Public API (FAISS-like) -----------------------
     def add_with_ids(self, x: np.ndarray, ids: Union[np.ndarray, List[int]]) -> None:
@@ -70,33 +78,31 @@ class VectorStore:
         if len(ids) != len(x):
             raise ValueError(f"ids length {len(ids)} != vectors length {len(x)}")
         data = [{self.id_field_name: vid, self.vector_field_name: v} for (vid, v) in zip(ids, x)]
-        self.client.insert(collection_name=self.collection, data=data)
+        self.client.insert(collection_name=self.collection_name, data=data)
 
     def remove_ids(self, ids: Union[np.ndarray, List[int]]) -> int:
         ids = self._as_int64_1d(ids)
-        res = self.client.delete(collection_name=self.collection, ids=ids.tolist())
-        # pymilvus returns delete count in res["delete_count"] on newer SDKs; be tolerant
-        return int(res.get("delete_count", len(ids)))
+        res = self.client.delete(collection_name=self.collection_name, ids=ids.tolist())
+        count_removed = int(res.get("delete_count"))
+        return count_removed
 
     def search(
         self,
         xq: np.ndarray,
         k: int = 10,
         search_params: Optional[Dict] = None,
-        output_fields: Optional[List[str]] = None,
-        expr: Optional[str] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        self._ensure_loaded()
         xq = self._as_float32_2d(xq)
         if search_params is None:
             search_params = self._default_search_params(self.index_type, self.metric_type)
         res = self.client.search(
-            collection_name=self.collection,
+            collection_name=self.collection_name,
             data=xq.tolist(),
             limit=int(k),
+            consistency_level="Strong",
         )
         I, D = self._hits_to_numpy(res, k=k)
-        return D, I  # match faiss: distances first, then ids
+        return D, I
 
     def range_search(
         self,
@@ -104,8 +110,6 @@ class VectorStore:
         radius: float,
         limit: Optional[int] = None,
         search_params: Optional[Dict] = None,
-        output_fields: Optional[List[str]] = None,
-        expr: Optional[str] = None,
     ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         """
         Returns per-query variable-length results like FAISS range_search:
@@ -114,7 +118,6 @@ class VectorStore:
         Milvus supports range search via `radius` and optional `range_filter`.
         We set a high limit to cap worst-case results when `limit` is None.
         """
-        self._ensure_loaded()
         xq = self._as_float32_2d(xq)
         if search_params is None:
             search_params = self._default_search_params(self.index_type, self.metric_type)
@@ -123,7 +126,7 @@ class VectorStore:
         params = {"radius": float(radius)}
         params.update(search_params.get("params", {}))
         res = self.client.search(
-            collection_name=self.collection,
+            collection_name=self.collection_name,
             data=xq,
             anns_field=self.vector_field_name,
             limit=cap,
@@ -144,53 +147,17 @@ class VectorStore:
 
     # --------------------------- Collection ops ----------------------------
     def load(self) -> None:
-        self.client.load_collection(self.collection)
+        self.client.load_collection(self.collection_name)
         self._loaded = True
 
     def release(self) -> None:
-        self.client.release_collection(self.collection)
+        self.client.release_collection(self.collection_name)
         self._loaded = False
 
     def drop(self) -> None:
-        self.client.drop_collection(self.collection)
+        self.client.drop_collection(self.collection_name)
         self._loaded = False
-
-    # ------------------------------ Internals ------------------------------
-    def _create_collection(self, id_type=DataType.INT64, description: str = "") -> None:
-        self.client.create_collection(
-            collection_name=self.collection,
-            dimension=self.dim,
-            auto_id=self.auto_id,
-            id_field_name=self.id_field_name,
-            id_type=id_type,
-            vector_field_name=self.vector_field_name,
-            metric_type=self.metric_type,
-            description=description,
-        )
-
-    def _ensure_index(self, index_type: str, index_params: Dict, sync: bool) -> None:
-        # Recreate index if mismatched / not present
-        existing = self.client.list_indexes(self.collection)
-        needs = True
-        if existing:
-            # If an index exists, skip (advanced users can drop + recreate outside)
-            needs = False
-        if needs:
-            self.client.create_index(
-                collection_name=self.collection,
-                field_name=self.vector_field_name,
-                index_params={
-                    "index_type": index_type,
-                    "metric_type": self.metric_type,
-                    "params": index_params or {},
-                },
-                sync=sync,
-            )
-
-    def _ensure_loaded(self) -> None:
-        if not self._loaded:
-            self.load()
-
+    
     # ----------------------------- Utilities -------------------------------
     @staticmethod
     def _as_float32_2d(x: Union[np.ndarray, Iterable[Iterable[float]]]) -> np.ndarray:
@@ -264,7 +231,6 @@ if __name__ == "__main__":
         metric_type="L2",
         index_type="FLAT",
         index_params={"M": 16, "efConstruction": 100},
-        drop_if_exists=True,
     )
 
     # Add data

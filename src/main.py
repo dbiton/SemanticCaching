@@ -2,7 +2,6 @@ import sys
 from concurrent.futures._base import as_completed
 from typing import List, Dict
 from concurrent.futures.thread import ThreadPoolExecutor
-from util.faiss_hnsw_delete_wrapper import DeletesOnlyWrapper
 sys.path.append(".")
 
 from concurrent.futures import ProcessPoolExecutor
@@ -11,7 +10,6 @@ import os
 import pickle
 from random import sample
 import time
-import faiss
 from matplotlib import pyplot as plt
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -26,6 +24,7 @@ from caches.OPT import RelaxedLearnedOPT, RelaxedOPT, OPT, ClusterOPT,\
 from caches.lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
 from util.reduce_dim import reduce_dim
 from util.faiss_like_hnsw import FaissLikeHNSW
+from vector_store import VectorStore
 
 dataset_filenames = {
     "WildChat": "datasets/embeds_wildchat.pkl",
@@ -69,7 +68,7 @@ def load_embeds(path: str, N: int):
     with open(path, "rb") as f:
         data = pickle.load(f)
     embeds_texts = np.array([data['text'][i] for i in range(N)])
-    embeds = np.array([data['embeds'][i] for i in range(N)]).astype(np.float32)
+    embeds = np.array([data['normalized_embeds'][i] for i in range(N)]).astype(np.float32)
     return embeds, embeds_texts
 
 def yield_batches_indices(total_size, batch_size):
@@ -98,8 +97,7 @@ def process(args):
     total_embeds, total_embeds_texts = load_embeds(dataset_path, stream_size)
     
     index = index_constr()
-    index.train(total_embeds[:1000])
-    assert batch_size == 1  # code assumes one query per batch
+    # assert batch_size == 1  # code assumes one query per batch
 
     # Initialize cache
     cache_constructor = cache_tuple[0]
@@ -119,7 +117,7 @@ def process(args):
     at_least_1_hits = 0
     
     # Unlimited fallback index
-    index_unlimited = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
+    # index_unlimited = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
 
     for i_embeds in yield_batches_indices(len(total_embeds), batch_size):
         embeds = total_embeds[i_embeds]
@@ -131,14 +129,14 @@ def process(args):
 
         runtime += runtime_per_l1
         total_hits += np.sum(iter_cache_hits)
-        at_least_1_hits += np.any(iter_cache_hits)
+        at_least_1_hits += len(np.where(iter_cache_hits > 0)[0])
 
         # L2/LLM fallback for total misses
         if np.any(iter_cache_hits == 0):
             runtime += runtime_per_l2
 
             miss_indices = np.array(i_embeds)[iter_cache_hits == 0]
-            batch_embeds_misses = total_embeds[miss_indices]
+            '''batch_embeds_misses = total_embeds[miss_indices]
 
             distances_sqrd, _ = index_unlimited.search(batch_embeds_misses, 1)
             distances = np.sqrt(distances_sqrd)
@@ -149,7 +147,7 @@ def process(args):
         # Update fallback index
         if len(evicted_embeds_ids) > 0:
             evicted_vectors = total_embeds[evicted_embeds_ids]
-            index_unlimited.add_with_ids(evicted_vectors, np.array(evicted_embeds_ids))
+            index_unlimited.add_with_ids(evicted_vectors, np.array(evicted_embeds_ids))'''
 
     fractional_recall_at_k = total_hits / (len(total_embeds) * count_nn)
     binary_recall_at_k = at_least_1_hits / len(total_embeds)
@@ -163,27 +161,42 @@ def process(args):
         "Runtime": time.time() - t0,
         "Cache Size": cache_size
     }
-
     return iter_results
 
-
-def get_hnsw_index():
-    d, M = 384, 32
-    base = faiss.IndexHNSWFlat(d, M)
-    idmap = faiss.IndexIDMap2(base)
-    hnsw_index = DeletesOnlyWrapper(idmap)
-    return hnsw_index
-
-def get_flat_index():
-    dim = 384
+def get_flat_index_faiss(dim: int = 384):
+    # Mirrors: IndexIDMap2(IndexHNSWFlat(dim, M=32))
     return faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
 
-def get_ivf_index():
-    dim = 384
-    count_cells = 10 
-    coarse_quantizer = faiss.IndexFlatL2(dim)
-    ivf_index = faiss.IndexIVFFlat(coarse_quantizer, dim, count_cells)
-    return ivf_index
+def get_hnsw_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
+    # Mirrors: IndexIDMap2(IndexHNSWFlat(dim, M=32))
+    return VectorStore(
+        uri=uri,
+        collection_name="vectors_hnsw",
+        dim=dim,
+        metric_type="L2",
+        index_type="HNSW",
+        index_params={"M": 32, "efConstruction": 200},
+    )
+
+def get_flat_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
+    return VectorStore(
+        uri=uri,
+        collection_name="vectors_flat",
+        dim=dim,
+        metric_type="L2",
+        index_type="FLAT",
+        index_params={},           # FLAT has no extra params
+    )
+
+def get_ivf_index_milvus(uri: str = "http://localhost:19530", dim: int = 384, nlist: int = 10):
+    return VectorStore(
+        uri=uri,
+        collection_name="vectors_ivf_flat",
+        dim=dim,
+        metric_type="L2",
+        index_type="IVF_FLAT",
+        index_params={"nlist": int(nlist)},
+    )
 
 def main():
     batch_size = 1
@@ -192,7 +205,7 @@ def main():
     MAX_CACHE_SIZE = 0.25
     COUNT_STEPS = 10
     dim = 384
-    same_embed_distance = .75
+    same_embed_distance = .5
     for dataset_name, dataset_path in get_embeds_paths():
         print(f"processing {dataset_name}")
         # indices = list(range(num_samples))
@@ -206,7 +219,7 @@ def main():
             #"SurprisalLFU": (SurprisalLFU, same_embed_distance),
             #"Surprisal": (Surprisal, same_embed_distance),
             "LFU": (LFU, same_embed_distance),
-            #"LRU": (LRU, same_embed_distance),
+            "LRU": (LRU, same_embed_distance),
             #"LRUK": (LRUK, same_embed_distance, 2),            
             #"DALFU": (DynamicAgingLFU, same_embed_distance, 32),
             #"ARC": (ARC, same_embed_distance),
@@ -219,8 +232,9 @@ def main():
         
         faiss_indices = {
             #"hnsw": get_hnsw_index,
-            "ivf": get_ivf_index,
-            #"flat": get_flat_index,
+            #"ivf": get_ivf_index,
+            "flat-faiss": get_flat_index_faiss,
+            #"flat-milvus": get_flat_index_milvus,
         }
         
         args = []
