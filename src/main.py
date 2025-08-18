@@ -36,7 +36,7 @@ dataset_filenames = {
     "MsMarco": "datasets/embeds_msmarco.pkl",
 }
 
-NUM_PROCS = 2
+NUM_PROCS = 1
 
 def get_metrics(embeds: List[np.ndarray], texts: List[str]) -> Dict[str, float]:
     metrics = {}
@@ -98,6 +98,7 @@ def process(args):
     total_embeds, total_embeds_texts = load_embeds(dataset_path, stream_size)
     
     index = index_constr()
+    index.train(total_embeds[:1000])
     assert batch_size == 1  # code assumes one query per batch
 
     # Initialize cache
@@ -177,12 +178,19 @@ def get_flat_index():
     dim = 384
     return faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
 
+def get_ivf_index():
+    dim = 384
+    count_cells = 10 
+    coarse_quantizer = faiss.IndexFlatL2(dim)
+    ivf_index = faiss.IndexIVFFlat(coarse_quantizer, dim, count_cells)
+    return ivf_index
+
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 100000
+    num_samples = 1000
     MAX_CACHE_SIZE = 0.25
-    COUNT_STEPS = 3
+    COUNT_STEPS = 10
     dim = 384
     same_embed_distance = .75
     for dataset_name, dataset_path in get_embeds_paths():
@@ -210,9 +218,9 @@ def main():
         }
         
         faiss_indices = {
-            "hnsw": get_hnsw_index,
-            #"ivf": faiss.IndexIDMap2(ivf_index),
-            "flat": get_flat_index,
+            #"hnsw": get_hnsw_index,
+            "ivf": get_ivf_index,
+            #"flat": get_flat_index,
         }
         
         args = []
