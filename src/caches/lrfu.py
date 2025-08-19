@@ -39,12 +39,12 @@ class LRFU(Cache):
             additions_ids.append(embed_id)
         
         if additions_ids:
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         for _ in range(count_remove):
             evict_key, _ = self.items.popitem()
             evicted_items.append(evict_key)
         if evicted_items:
-            self.index.remove_ids(np.array(evicted_items))
+            self.remove_ids(np.array(evicted_items))
         self.time += len(embeds)
         return cache_hits, evicted_items
 

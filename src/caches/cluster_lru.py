@@ -61,7 +61,7 @@ class ClusterLRU(Cache):
             to_evict_cnt -= 1
 
         if evicted_items:
-            self.index.remove_ids(np.array(evicted_items, dtype=np.int64))
+            self.remove_ids(np.array(evicted_items, dtype=np.int64))
 
         # ---------- 3. insert new vectors -----------------------------
         additions_embeds = []
@@ -78,7 +78,7 @@ class ClusterLRU(Cache):
             additions_ids.append(eid)
 
         if additions_ids:
-            self.index.add_with_ids(np.array(additions_embeds),
+            self.add_with_ids(np.array(additions_embeds),
                                     np.array(additions_ids, dtype=np.int64))
 
         # ---------- 4. return ----------------------------------------

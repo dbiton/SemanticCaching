@@ -15,11 +15,11 @@ class ARC(Cache):
     # helpers
     def _add_to_T1(self, eid, vec):
         self.T1[eid] = vec
-        self.index.add_with_ids(vec[np.newaxis, :], np.array([eid]))
+        self.add_with_ids(vec[np.newaxis, :], np.array([eid]))
 
     def _add_to_T2(self, eid, vec):
         self.T2[eid] = vec
-        self.index.add_with_ids(vec[np.newaxis, :], np.array([eid]))
+        self.add_with_ids(vec[np.newaxis, :], np.array([eid]))
 
     def _move_T1_to_T2(self, eid):
         vec = self.T1.pop(eid)
@@ -37,7 +37,7 @@ class ARC(Cache):
             vid, vvec = self.T2.popitem(last=False)
             self.B2[vid] = None
 
-        self.index.remove_ids(np.array([vid], dtype=np.int64))
+        self.remove_ids(np.array([vid], dtype=np.int64))
         return vid
     # ------------------------------------------------------------------ #
 
@@ -95,7 +95,7 @@ class ARC(Cache):
                     # T1 is full → move its LRU to B1
                     vid, vvec = self.T1.popitem(last=False)
                     self.B1[vid] = None
-                    self.index.remove_ids(np.array([vid], dtype=np.int64))
+                    self.remove_ids(np.array([vid], dtype=np.int64))
                     evicted_items.append(vid)
 
             elif len(self.T1) + len(self.T2) + len(self.B1) + len(self.B2) >= 2 * self.capacity:

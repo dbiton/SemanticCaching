@@ -21,7 +21,7 @@ def embed_strings(strings: List[str], model_name: str = "all-MiniLM-L6-v2") -> n
         print(f"Loaded model {model_name} into device {models[model_name].device}")
     model = models[model_name]
     embs = model.encode(strings, convert_to_numpy=True, show_progress_bar=True)
-    return normalize(embs)
+    return embs
 
 @contextmanager
 def writer(path: str):
@@ -50,8 +50,10 @@ def pack_and_dump(path: str, texts: List[str], meta: Dict[str, List[Any]], model
             print(f'Skipping "{path}" because it already exists')
             return
         embeds = embed_strings(texts, model_name=model_name)
+        normalized_embeds = normalize(embeds)
         payload = {
             "text": texts,
+            "normalized_embeds": normalized_embeds,
             "embeds": embeds,
             "meta": meta
         }

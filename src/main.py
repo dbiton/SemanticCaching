@@ -26,7 +26,6 @@ from caches.arc import ARC
 from caches.cluster_lru import ClusterLRU
 from caches.lru_k import LRUK
 from caches.OPT import OPT, ClusterOPT
-from util.faiss_like_hnsw import FaissLikeHNSW
 from vector_stores.milvus_interface import MilvusVectorStore
 from vector_stores.hnswlib_interface import HNSWVectorStore
 
@@ -180,12 +179,9 @@ def get_ivf_index_milvus(uri: str = "http://localhost:19530", dim: int = 384, nl
     )
 
 def main():
-    vs = MilvusVectorStore(collection_name="dummy")
-    vs.drop_all()
-    
     batch_size = 1
     count_nn = 1
-    num_samples = 100000
+    num_samples = 1000
     MAX_CACHE_SIZE = 0.1
     COUNT_STEPS = 10
     dim = 384
@@ -203,15 +199,15 @@ def main():
             #"SurprisalLFU": (SurprisalLFU, same_embed_distance),
             #"Surprisal": (Surprisal, same_embed_distance),
             "LFU": (LFU, same_embed_distance),
-            #"LRU": (LRU, same_embed_distance),
-            #"LRUK": (LRUK, same_embed_distance, 2),            
-            #"DALFU": (DynamicAgingLFU, same_embed_distance, 32),
-            #"ARC": (ARC, same_embed_distance),
-            #"ClusterLRU": (ClusterLRU, same_embed_distance),
-            #"ClusterLFU": (ClusterLFU, same_embed_distance),
-            #"DistanceLFU": (DistanceLFU, same_embed_distance),
-            #"RAP": (RAP, same_embed_distance),
-            # "SphereLFU": (SphereQueryLFU, same_embed_distance),
+            "LRU": (LRU, same_embed_distance),
+            "LRUK": (LRUK, same_embed_distance, 2),            
+            "DALFU": (DynamicAgingLFU, same_embed_distance, 32),
+            "ARC": (ARC, same_embed_distance),
+            "ClusterLRU": (ClusterLRU, same_embed_distance),
+            "ClusterLFU": (ClusterLFU, same_embed_distance),
+            "DistanceLFU": (DistanceLFU, same_embed_distance),
+            "RAP": (RAP, same_embed_distance),
+            "SphereLFU": (SphereQueryLFU, same_embed_distance),
         }
         
         faiss_indices = {

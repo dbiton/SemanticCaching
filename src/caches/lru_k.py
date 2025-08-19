@@ -42,7 +42,7 @@ class LRUK(Cache):
         n_evictions = max(0, self.size() + len(new_insertions) - self.capacity)
         if n_evictions:
             victims = sorted(self.items.keys(), key=self._score)[:n_evictions]
-            self.index.remove_ids(np.array(victims, dtype=np.int64))
+            self.remove_ids(np.array(victims, dtype=np.int64))
             for vid in victims:
                 evicted_items.append(vid)
                 self.items.pop(vid, None)
@@ -51,7 +51,7 @@ class LRUK(Cache):
         if new_insertions:
             ins_embeds  = np.array([e for _, e in new_insertions])
             ins_ids     = np.array([i for i, _ in new_insertions])
-            self.index.add_with_ids(ins_embeds, ins_ids)
+            self.add_with_ids(ins_embeds, ins_ids)
             for eid in ins_ids:
                 self.items[eid] = None
                 self._touch(int(eid))

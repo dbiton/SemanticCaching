@@ -8,8 +8,9 @@ import faiss
 
 from util.surprisal import calculate_perplexity, calculate_surprisal
 from util.online_clusters import OnlineClusters
+from typing import List
 
-
+i = 0
 class Cache:
     def __init__(self, same_embed_distance: float):
         self.items = None  # our internal cache storage
@@ -24,6 +25,12 @@ class Cache:
     def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
         raise NotImplementedError("virtual method")
 
+    def add_with_ids(self, embeds: list[np.ndarray], embeds_ids: List[str]):
+        self.index.add_with_ids(np.array(embeds).astype('float32'), np.array(embeds_ids).astype('int64'))
+    
+    def remove_ids(self, embeds_ids: List[str]):
+        self.index.remove_ids(np.array(embeds_ids).astype('int64'))
+    
     def get_closest_stored_embeds(self, embeds, count_nn=1):
         dists, ids = self.index.search(embeds, count_nn)
         dists = np.sqrt(dists)
@@ -78,8 +85,8 @@ class RR(Cache):
         for i in removed_indices:
             self.items.pop(i)
         if len(removals) > 0:
-            self.index.remove_ids(removals)
-        self.index.add_with_ids(embeds, embeds_ids)
+            self.remove_ids(removals)
+        self.add_with_ids(embeds, embeds_ids)
         self.items += embeds_ids
         return cache_hits, removals
 
@@ -125,9 +132,9 @@ class ClusterLFU(Cache):
             additions_embeds.append(embed)
             additions_ids.append(embed_id)
         if evicted_items:
-            self.index.remove_ids(np.array(evicted_items))
+            self.remove_ids(np.array(evicted_items))
         if additions_ids:
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
 class LFU(Cache):
@@ -160,15 +167,14 @@ class LFU(Cache):
             for embed_id, _ in least_used:
                 del self.items[embed_id]
                 evicted_items.append(embed_id)
-
         for embed_id, embed in zip(embeds_ids, embeds):
             self.items[embed_id] = 0
             additions_embeds.append(embed)
             additions_ids.append(embed_id)
-        if evicted_items:
-            self.index.remove_ids(np.array(evicted_items))
+        if len(evicted_items) > 0:
+            self.remove_ids(evicted_items)
         if additions_ids:
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(additions_embeds, additions_ids)
         return cache_hits, evicted_items
 
 class SurprisalLFU(Cache):
@@ -207,9 +213,9 @@ class SurprisalLFU(Cache):
             additions_embeds.append(embed)
             additions_ids.append(embed_id)
         if evicted_items:
-            self.index.remove_ids(np.array(evicted_items))
+            self.remove_ids(np.array(evicted_items))
         if additions_ids:
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
 class SimpleCache(Cache):
@@ -246,9 +252,9 @@ class SimpleCache(Cache):
             additions_embeds.append(embed)
             additions_ids.append(embed_id)
         if evicted_items:
-            self.index.remove_ids(np.array(evicted_items))
+            self.remove_ids(np.array(evicted_items))
         if additions_ids:
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
 class CountChars(SimpleCache):
@@ -300,9 +306,9 @@ class SphereQueryLFU(Cache):
             additions_embeds.append(embed)
             additions_ids.append(embed_id)
         if evicted_items:
-            self.index.remove_ids(np.array(evicted_items))
+            self.remove_ids(np.array(evicted_items))
         if additions_ids:
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
 class DistanceLFU(Cache):
@@ -336,9 +342,9 @@ class DistanceLFU(Cache):
             additions_embeds.append(embed)
             additions_ids.append(embed_id)
         if evicted_items:
-            self.index.remove_ids(np.array(evicted_items))
+            self.remove_ids(np.array(evicted_items))
         if additions_ids:
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
 class DynamicAgingLFU(Cache):
@@ -382,9 +388,9 @@ class DynamicAgingLFU(Cache):
             additions_embeds.append(embed)
             additions_ids.append(embed_id)
         if evicted_items:
-            self.index.remove_ids(np.array(evicted_items))
+            self.remove_ids(np.array(evicted_items))
         if additions_ids:
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
 class LRU(Cache):
@@ -412,12 +418,12 @@ class LRU(Cache):
             additions_embeds.append(embed)
             additions_ids.append(embed_id)
         if additions_ids:
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         for _ in range(count_remove):
             embed_id, _ = self.items.popitem(last = False)
             evicted_items.append(embed_id)
         if evicted_items:
-            self.index.remove_ids(np.array(evicted_items))
+            self.remove_ids(np.array(evicted_items))
         return cache_hits, evicted_items
 
 class RAP(Cache):
@@ -454,10 +460,10 @@ class RAP(Cache):
             additions_embeds.append(embed)
             additions_ids.append(embed_id)
         if removed_items:
-            self.index.remove_ids(np.array(removed_items))
+            self.remove_ids(np.array(removed_items))
         if additions_ids:
             self.items.update({eid: 0 for eid in additions_ids})
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, removed_items + rejected_items
 
 class FixedRadius(Cache):
@@ -491,14 +497,14 @@ class FixedRadius(Cache):
             removed_items = heapq.nsmallest(count_removed, self.items, key=self.items.get)
             for k in removed_items:
                 del self.items[k]
-            self.index.remove_ids(np.array(removed_items))
+            self.remove_ids(np.array(removed_items))
             evicted_items += removed_items
         if additions:
             additions_embeds = [v for (_, v, _) in additions]
             additions_ids = [v for (v, _, _) in additions]
             for (embed_id, _, size_neigh) in additions:
                 self.items[embed_id] = size_neigh
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
 class PCA(Cache):
@@ -562,14 +568,14 @@ class PCA(Cache):
                     del self.clusters[smallest_cluster]
                 del self.items[k]
                 evicted_items.append(k)
-            self.index.remove_ids(np.array(evicted_items))
+            self.remove_ids(np.array(evicted_items))
         if additions:
             additions_embeds = [v for (_, v) in additions]
             additions_ids = [v for (v, _) in additions]
             additions_clusters_ids = self.embeds_to_clusters_ids(additions_embeds)
             for (embed_id, embed), cluster_id in zip(additions, additions_clusters_ids):
                 self.items[embed_id] = cluster_id
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         return cache_hits, evicted_items
 
 class BetterTinyLFU(Cache):
@@ -654,9 +660,9 @@ class BetterTinyLFU(Cache):
             removals += self.decay_frequencies()
         
         if removals:
-            self.index.remove_ids(np.array(removals))
+            self.remove_ids(np.array(removals))
         if additions_ids:
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
 
         return cache_hits, removals
     
@@ -722,8 +728,8 @@ class TinyLFU(Cache):
             removals += self.decay_frequencies()
         
         if removals:
-            self.index.remove_ids(np.array(removals))
+            self.remove_ids(np.array(removals))
         if additions_ids:
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
 
         return cache_hits, removals

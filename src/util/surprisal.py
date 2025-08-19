@@ -1,4 +1,5 @@
 
+'''
 import json
 from datasets import load_dataset
 import faiss
@@ -19,14 +20,12 @@ from sklearn.metrics import r2_score
 import matplotlib.pyplot as plt
 from typing import List
 
-
 nltk.download('brown')
 nltk.download('punkt')
 nltk.download('punkt_tab')
 
-
 corpus_words = brown.words()
-word_freq = Counter([w.lower() for w in corpus_words])
+word_freq = {}#Counter([w.lower() for w in corpus_words])
 total_words = sum(word_freq.values())
 word_prob = {word: freq / total_words for word, freq in word_freq.items()}
 
@@ -47,12 +46,8 @@ def calculate_perplexity(sentence: str):
 
 def calculate_embedding(sentence: str):
     return embedding_model.encode(sentence, convert_to_numpy=True).tolist()
-
-def calculate_surprisal(sentence: str):
-    tokens = nltk.word_tokenize(sentence.lower())
-    score = -sum(math.log(word_prob.get(word, 1e-7)) for word in tokens)
-    return score
-
+    
+    
 def generate_dataset(limit: int) -> List[str]:
     dataset = load_dataset("PaulPauls/openwebtext-sentences", split="train")
     return dataset[:limit]['text']
@@ -113,3 +108,13 @@ def train():
     plt.gca().invert_yaxis()
     plt.tight_layout()
     plt.show()
+'''
+
+def calculate_perplexity(sentence: str):
+    raise Exception("don't use!")
+
+def calculate_surprisal(sentence: str):
+    raise Exception("don't use!")
+    tokens = nltk.word_tokenize(sentence.lower())
+    score = -sum(math.log(word_prob.get(word, 1e-7)) for word in tokens)
+    return score

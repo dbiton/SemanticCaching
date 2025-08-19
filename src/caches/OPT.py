@@ -9,13 +9,10 @@ import xgboost as xgb
 import random
 from scipy import stats
 
-from util.surprisal import calculate_surprisal
 import re
-from scipy.stats._stats_py import median_abs_deviation
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from sklearn.model_selection import train_test_split
 from sklearn.model_selection import TimeSeriesSplit
-from src.util.reduce_dim import cluster_complete_linkage_faiss, cluster_embeddings_faiss, greedy_cluster_faiss
+from src.util.reduce_dim import cluster_complete_linkage_faiss
 
 class OPT(Cache):
 
@@ -80,9 +77,9 @@ class OPT(Cache):
         if additions:
             additions_embeds = [v for (_, v) in additions]
             additions_ids = [v for (v, _) in additions]
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         if evicted_items:
-            self.index.remove_ids(np.array(evicted_items))
+            self.remove_ids(np.array(evicted_items))
         return cache_hits, evicted_items + rejected_items
 
 
@@ -161,9 +158,9 @@ class ClusterRelaxedOPT(Cache):
         if additions:
             additions_embeds = [v for (_, v) in additions]
             additions_ids = [v for (v, _) in additions]
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         if evicted_items:
-            self.index.remove_ids(np.array(evicted_items))
+            self.remove_ids(np.array(evicted_items))
 
         return cache_hits, evicted_items + rejected_items
 
@@ -226,9 +223,9 @@ class ClusterOPT(Cache):
         if additions:
             additions_embeds = [v for (_, v) in additions]
             additions_ids = [v for (v, _) in additions]
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         if evicted_items:
-            self.index.remove_ids(np.array(evicted_items))
+            self.remove_ids(np.array(evicted_items))
         return cache_hits, evicted_items + rejected_items
 
 class RelaxedOPT(Cache):
@@ -301,9 +298,9 @@ class RelaxedOPT(Cache):
         if additions:
             additions_embeds = [v for (_, v) in additions]
             additions_ids = [v for (v, _) in additions]
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         if evicted_items:
-            self.index.remove_ids(np.array(evicted_items))
+            self.remove_ids(np.array(evicted_items))
         return cache_hits, evicted_items + rejected_items
 
 
@@ -657,7 +654,7 @@ class RelaxedLearnedOPT(Cache):
         if additions:
             additions_embeds = [v for (_, v) in additions]
             additions_ids = [v for (v, _) in additions]
-            self.index.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         if evicted_items:
-            self.index.remove_ids(np.array(evicted_items))
+            self.remove_ids(np.array(evicted_items))
         return cache_hits, evicted_items + rejected_items
