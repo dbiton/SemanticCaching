@@ -1,41 +1,46 @@
 import sys
 from concurrent.futures._base import as_completed
+import threading
 from typing import List, Dict
 from concurrent.futures.thread import ThreadPoolExecutor
+import uuid
+
+from vector_stores.naive_interface import NaiveVectorStore
 sys.path.append(".")
 
+import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
-import copy
 import os
 import pickle
 from random import sample
 import time
 from matplotlib import pyplot as plt
 import numpy as np
-from sentence_transformers import SentenceTransformer
 import tqdm
+import numpy as np
+import time
+import faiss
 
 from caches.cache import *
 from caches.arc import ARC
 from caches.cluster_lru import ClusterLRU
 from caches.lru_k import LRUK
-from caches.OPT import RelaxedLearnedOPT, RelaxedOPT, OPT, ClusterOPT,\
-    ClusterRelaxedOPT
-from caches.lrfu import LRFU, DeltaLRFU, HillClimbingLRFU
-from util.reduce_dim import reduce_dim
+from caches.OPT import OPT, ClusterOPT
 from util.faiss_like_hnsw import FaissLikeHNSW
-from vector_store import VectorStore
+from vector_stores.milvus_interface import MilvusVectorStore
+from vector_stores.hnswlib_interface import HNSWVectorStore
+
 
 dataset_filenames = {
-    "WildChat": "datasets/embeds_wildchat.pkl",
     "Quora": "datasets/embeds_quora_qp.pkl",
-    "StackOverflow": "datasets/embeds_stackoverflow.pkl",
     "ELI5": "datasets/embeds_eli5.pkl",
     "NaturalQuestions": "datasets/embeds_nq.pkl",
     "MsMarco": "datasets/embeds_msmarco.pkl",
+    "WildChat": "datasets/embeds_wildchat.pkl",
+    #"StackOverflow": "datasets/embeds_stackoverflow.pkl",
 }
 
-NUM_PROCS = 1
+NUM_PROCS = 4
 
 def get_metrics(embeds: List[np.ndarray], texts: List[str]) -> Dict[str, float]:
     metrics = {}
@@ -67,18 +72,14 @@ def get_embeds_paths():
 def load_embeds(path: str, N: int):
     with open(path, "rb") as f:
         data = pickle.load(f)
-    embeds_texts = np.array([data['text'][i] for i in range(N)])
-    embeds = np.array([data['normalized_embeds'][i] for i in range(N)]).astype(np.float32)
+    embeds_texts = data['text'][:N]
+    embeds = np.array(data['normalized_embeds'][:N], dtype=np.float32)
     return embeds, embeds_texts
 
-def yield_batches_indices(total_size, batch_size):
-    for i in range(0, total_size, batch_size):
-        yield list(range(i, min(i+batch_size, total_size)))
-
-import numpy as np
-import time
-import faiss
-
+def yield_batch_slices(total_size, batch_size):
+    for start in range(0, total_size, batch_size):
+        stop = min(start + batch_size, total_size)
+        yield slice(start, stop), list(range(start, stop))
 
 def process(args):
     (
@@ -92,12 +93,11 @@ def process(args):
         cache_name,
         batch_size,
         count_nn,
+        progress_queue,
     ) = args
 
     total_embeds, total_embeds_texts = load_embeds(dataset_path, stream_size)
-    
     index = index_constr()
-    # assert batch_size == 1  # code assumes one query per batch
 
     # Initialize cache
     cache_constructor = cache_tuple[0]
@@ -105,56 +105,26 @@ def process(args):
     cache = cache_constructor(*cache_args)
     cache.initialize(cache_size, index)
 
-    # Runtime bookkeeping
     t0 = time.time()
-    runtime_per_l1 = 1
-    runtime_per_l2 = 10
-    runtime_per_llm = 100
-    runtime = 0
 
     # Stats
     total_hits = 0
     at_least_1_hits = 0
     
-    # Unlimited fallback index
-    # index_unlimited = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
-
-    for i_embeds in yield_batches_indices(len(total_embeds), batch_size):
-        embeds = total_embeds[i_embeds]
-        embeds_texts = total_embeds_texts[i_embeds]
-
-        # Cache lookup
-        iter_cache_hits, evicted_embeds_ids = cache.request(embeds, i_embeds, count_nn, embeds_texts)
-        # iter_cache_hits: shape (batch_size,), each entry ∈ [0, count_nn]
-
-        runtime += runtime_per_l1
+    for sl, i_embeds in yield_batch_slices(len(total_embeds), batch_size):
+        embeds = total_embeds[sl]
+        embeds_texts = total_embeds_texts[sl]
+        iter_cache_hits, _ = cache.request(embeds, i_embeds, count_nn, embeds_texts)
         total_hits += np.sum(iter_cache_hits)
         at_least_1_hits += len(np.where(iter_cache_hits > 0)[0])
-
-        # L2/LLM fallback for total misses
-        if np.any(iter_cache_hits == 0):
-            runtime += runtime_per_l2
-
-            miss_indices = np.array(i_embeds)[iter_cache_hits == 0]
-            '''batch_embeds_misses = total_embeds[miss_indices]
-
-            distances_sqrd, _ = index_unlimited.search(batch_embeds_misses, 1)
-            distances = np.sqrt(distances_sqrd)
-            count_found = np.count_nonzero(distances <= cache.same_embed_distance)
-            count_missing = len(batch_embeds_misses) - count_found
-            runtime += runtime_per_llm * count_missing
-
-        # Update fallback index
-        if len(evicted_embeds_ids) > 0:
-            evicted_vectors = total_embeds[evicted_embeds_ids]
-            index_unlimited.add_with_ids(evicted_vectors, np.array(evicted_embeds_ids))'''
+        if progress_queue is not None:
+            progress_queue.put(len(i_embeds))
 
     fractional_recall_at_k = total_hits / (len(total_embeds) * count_nn)
     binary_recall_at_k = at_least_1_hits / len(total_embeds)
 
     iter_results = {
         "Index": index_name,
-        "Sim. Runtime": runtime,
         "Cache Name": cache_name,
         "Recall@K": fractional_recall_at_k,
         "AtLeast1@K": binary_recall_at_k,
@@ -164,14 +134,13 @@ def process(args):
     return iter_results
 
 def get_flat_index_faiss(dim: int = 384):
-    # Mirrors: IndexIDMap2(IndexHNSWFlat(dim, M=32))
     return faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
 
 def get_hnsw_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
-    # Mirrors: IndexIDMap2(IndexHNSWFlat(dim, M=32))
-    return VectorStore(
+    id = f"vector{uuid.uuid4()}".replace("-", "_")
+    return MilvusVectorStore(
         uri=uri,
-        collection_name="vectors_hnsw",
+        collection_name=id,
         dim=dim,
         metric_type="L2",
         index_type="HNSW",
@@ -179,19 +148,31 @@ def get_hnsw_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
     )
 
 def get_flat_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
-    return VectorStore(
+    id = f"vector{uuid.uuid4()}".replace("-", "_")
+    return MilvusVectorStore(
         uri=uri,
-        collection_name="vectors_flat",
+        collection_name=id,
         dim=dim,
         metric_type="L2",
         index_type="FLAT",
         index_params={},           # FLAT has no extra params
     )
 
+def get_hnsw_index_hnswlib(dim: int = 384):
+    return HNSWVectorStore(
+        dim = dim
+    )
+
+def get_flat_index_naive(dim: int = 384):
+    return NaiveVectorStore(
+        dim = dim
+    )
+
 def get_ivf_index_milvus(uri: str = "http://localhost:19530", dim: int = 384, nlist: int = 10):
-    return VectorStore(
+    id = f"vector{uuid.uuid4()}".replace("-", "_")
+    return MilvusVectorStore(
         uri=uri,
-        collection_name="vectors_ivf_flat",
+        collection_name=id,
         dim=dim,
         metric_type="L2",
         index_type="IVF_FLAT",
@@ -199,13 +180,16 @@ def get_ivf_index_milvus(uri: str = "http://localhost:19530", dim: int = 384, nl
     )
 
 def main():
+    vs = MilvusVectorStore(collection_name="dummy")
+    vs.drop_all()
+    
     batch_size = 1
     count_nn = 1
-    num_samples = 1000
-    MAX_CACHE_SIZE = 0.25
+    num_samples = 100000
+    MAX_CACHE_SIZE = 0.1
     COUNT_STEPS = 10
     dim = 384
-    same_embed_distance = .5
+    same_embed_distance = .75
     for dataset_name, dataset_path in get_embeds_paths():
         print(f"processing {dataset_name}")
         # indices = list(range(num_samples))
@@ -219,7 +203,7 @@ def main():
             #"SurprisalLFU": (SurprisalLFU, same_embed_distance),
             #"Surprisal": (Surprisal, same_embed_distance),
             "LFU": (LFU, same_embed_distance),
-            "LRU": (LRU, same_embed_distance),
+            #"LRU": (LRU, same_embed_distance),
             #"LRUK": (LRUK, same_embed_distance, 2),            
             #"DALFU": (DynamicAgingLFU, same_embed_distance, 32),
             #"ARC": (ARC, same_embed_distance),
@@ -227,32 +211,46 @@ def main():
             #"ClusterLFU": (ClusterLFU, same_embed_distance),
             #"DistanceLFU": (DistanceLFU, same_embed_distance),
             #"RAP": (RAP, same_embed_distance),
-            #"SphereLFU": (SphereQueryLFU, same_embed_distance),
+            # "SphereLFU": (SphereQueryLFU, same_embed_distance),
         }
         
         faiss_indices = {
             #"hnsw": get_hnsw_index,
             #"ivf": get_ivf_index,
-            "flat-faiss": get_flat_index_faiss,
             #"flat-milvus": get_flat_index_milvus,
+            #"flat-faiss": get_flat_index_faiss,
+            # "hnsw-hnswlib": get_hnsw_index_hnswlib,
+            "flat-naive": get_flat_index_naive,
         }
+        
+        # feedback
+        num_batches = len(caches) * len(faiss_indices) * num_samples * COUNT_STEPS
+        pbar = tqdm.tqdm(total=num_batches, desc=f"Processing {dataset_name}'s {num_batches} batches")
+        manager = mp.Manager()
+        progress_queue = manager.Queue()
+        stop_token = -1
+        def consumer(pbar):
+            while True:
+                item = progress_queue.get()
+                if item == -1:
+                    break
+                pbar.update(item)
+        t = threading.Thread(target=consumer, args=(pbar,), daemon=True)
+        t.start()
+        # feedback
         
         args = []
         for cache_name, create_cache_args in caches.items():
             step_size = int(num_samples * MAX_CACHE_SIZE // COUNT_STEPS)
             for faiss_index_name, faiss_index in faiss_indices.items():
                 for cache_size in range(step_size, int(num_samples * MAX_CACHE_SIZE), step_size):
-                    args.append((faiss_index_name, faiss_index, create_cache_args, num_samples, cache_size, dim, dataset_path, cache_name, batch_size, count_nn))
-        
-        num_batches = len(caches) * COUNT_STEPS * len(faiss_indices)
-        pbar = tqdm.tqdm(total=num_batches, desc=f"Processing {dataset_name}'s {num_batches} batches")
+                    args.append((faiss_index_name, faiss_index, create_cache_args, num_samples, cache_size, dim, dataset_path, cache_name, batch_size, count_nn, progress_queue))
         results = {}
         Pool = ProcessPoolExecutor if NUM_PROCS > 1 else ThreadPoolExecutor
         with Pool(NUM_PROCS) as executor:
             futures = [executor.submit(process, arg) for arg in args]
             for future in as_completed(futures):
                 result = future.result()
-                pbar.update(1)
                 for prop_name, prop in result.items():
                     _cache_name = result['Cache Name']
                     cache_index = result['Index']
@@ -265,7 +263,8 @@ def main():
                     if cache_name not in results[prop_name]:
                         results[prop_name][cache_name] = {}
                     results[prop_name][cache_name][cache_size] = prop
-                print(cache_name, result)
+        progress_queue.put(stop_token)
+        t.join()
         plot(dataset_name, results)
 
 if __name__=="__main__":

@@ -3,6 +3,7 @@ from typing import Optional, Dict, Set, Tuple
 import faiss
 import numpy as np
 
+# Check about removing from index bug!
 class OnlineClusters:
     def __init__(self, cluster_distance: float, dim: int):
         self.cluster_distance_sqrd = cluster_distance ** 2

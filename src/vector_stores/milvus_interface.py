@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Iterable, List, Optional, Tuple, Union, Dict
 import numpy as np
+import uuid
 
 try:
     from pymilvus import MilvusClient, DataType
@@ -8,7 +9,7 @@ except Exception as e:
     raise RuntimeError("pymilvus is required: pip install pymilvus") from e
 
 
-class VectorStore:
+class MilvusVectorStore:
     """
     Milvus-backed vector store exposing a FAISS-like interface:
       - add_with_ids(x, ids)
@@ -158,6 +159,12 @@ class VectorStore:
         self.client.drop_collection(self.collection_name)
         self._loaded = False
     
+    def drop_all(self) -> None:
+        collections = self.client.list_collections()
+        for coll in collections:
+            self.client.drop_collection(coll)
+            print(f"Dropped collection: {coll}")
+    
     # ----------------------------- Utilities -------------------------------
     @staticmethod
     def _as_float32_2d(x: Union[np.ndarray, Iterable[Iterable[float]]]) -> np.ndarray:
@@ -226,7 +233,7 @@ if __name__ == "__main__":
     dim = 64
     store = VectorStore(
         uri="http://localhost:19530",
-        collection_name="demo_vectors",
+        collection_name=f"vector{uuid.uuid4()}".replace("-", "_"),
         dim=dim,
         metric_type="L2",
         index_type="FLAT",
@@ -253,3 +260,4 @@ if __name__ == "__main__":
 
     # Cleanup
     store.drop()
+    store.drop_all()
