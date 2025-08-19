@@ -14,7 +14,6 @@ class NaiveVectorStore:
       - remove_ids(ids: int64[m]) -> int
       - search(xq: float32[q, d], k: int) -> (D: float32[q, k], I: int64[q, k])
       - range_search(xq: float32[q, d], radius: float, limit: Optional[int]) -> (List[float32[<=n]], List[int64[<=n]])
-      - drop() -> None
     Notes:
       * Distances are **squared L2** (same convention as FAISS).
       * Designed for very update-heavy (add/remove) workloads: uses capacity growth and swap-pop deletes.
@@ -197,15 +196,6 @@ class NaiveVectorStore:
             ilists.append(ids[idxs[order]].astype(np.int64, copy=False))
         return dlists, ilists
 
-    def drop(self) -> None:
-        """Reset the store to empty (releases memory by shrinking capacity)."""
-        self._cap = 0
-        self._size = 0
-        self._vecs  = np.empty((0, self.dim), dtype=np.float32)
-        self._ids   = np.empty((0,), dtype=np.int64)
-        self._norm2 = np.empty((0,), dtype=np.float32)
-        self._id2row.clear()
-
     # Convenience: check internal consistency (used in tests)
     def _check_invariants(self) -> None:
         assert 0 <= self._size <= self._cap
@@ -303,20 +293,6 @@ def test_range_search_and_limit():
     assert np.all(il2[0] == np.array([10,11], dtype=np.int64))
     assert np.allclose(dl2[0], np.array([0.25,0.25], dtype=np.float32))
 
-def test_drop_and_reuse():
-    dim = 3
-    store = NaiveVectorStore(dim, initial_capacity=8)
-    xb = np.random.random((4, dim)).astype(np.float32, order="C")
-    ids = np.array([7,8,9,10], dtype=np.int64)
-    store.add_with_ids(xb, ids)
-    assert len(store) == 4
-    store.drop()
-    assert len(store) == 0
-    # can add again
-    store.add_with_ids(xb[:2], np.array([100,101], dtype=np.int64))
-    assert len(store) == 2
-    store._check_invariants()
-
 def test_update_heavy_stress():
     dim = 16
     rng = np.random.default_rng(42)
@@ -357,7 +333,6 @@ def run_all_tests():
         test_remove_ids_and_mappings,
         test_k_greater_than_n_and_empty,
         test_range_search_and_limit,
-        test_drop_and_reuse,
         test_update_heavy_stress,
     ]
     t0 = time.time()
