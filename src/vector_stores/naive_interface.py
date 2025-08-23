@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 from typing import List, Tuple, Optional
+import faiss
 import numpy as np
 import time
 
@@ -160,41 +161,66 @@ class NaiveVectorStore:
         xq: np.ndarray,
         radius: float,
         limit: Optional[int] = None
-    ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Returns FAISS-compatible (lims, D, I):
+        - lims: int64[nq+1] cumulative counts
+        - D:    float32[total_matches]
+        - I:    int64[total_matches]
+        Behavior:
+        * If limit is None: mimic FAISS scan order (no sorting).
+        * If limit is not None: keep the smallest `limit` distances per query (sorted asc).
+        """
         assert isinstance(xq, np.ndarray) and xq.ndim == 2 and xq.shape[1] == self.dim and xq.dtype == np.float32 and xq.flags['C_CONTIGUOUS']
         assert isinstance(radius, (float, np.floating)) and radius >= 0.0
+
         n = self._size
         nq = xq.shape[0]
-        cap = int(limit) if limit is not None else n
-
-        if n == 0:
-            return [np.empty((0,), dtype=np.float32) for _ in range(nq)], \
-                   [np.empty((0,), dtype=np.int64)   for _ in range(nq)]
 
         base = slice(0, n)
         xb = self._vecs[base, :]
         ids = self._ids[base]
         n2 = self._norm2[base]
 
+        if n == 0:
+            return np.zeros(nq + 1, dtype=np.int64), np.empty((0,), dtype=np.float32), np.empty((0,), dtype=np.int64)
+
         qn2 = np.einsum('ij,ij->i', xq, xq, dtype=np.float32)[:, None]
         dot = xq @ xb.T
         dist2 = qn2 + n2[None, :] - 2.0 * dot
         np.maximum(dist2, 0.0, out=dist2)
 
-        dlists: List[np.ndarray] = []
-        ilists: List[np.ndarray] = []
+        lims = np.empty(nq + 1, dtype=np.int64)
+        lims[0] = 0
+        D_chunks: List[np.ndarray] = []
+        I_chunks: List[np.ndarray] = []
+        total = 0
+
         for i in range(nq):
-            idxs = np.flatnonzero(dist2[i] <= radius)
-            if idxs.size == 0:
-                dlists.append(np.empty((0,), dtype=np.float32))
-                ilists.append(np.empty((0,), dtype=np.int64))
-                continue
-            order = np.argsort(dist2[i, idxs])
-            if cap is not None:
-                order = order[:cap]
-            dlists.append(dist2[i, idxs[order]].astype(np.float32, copy=False))
-            ilists.append(ids[idxs[order]].astype(np.int64, copy=False))
-        return dlists, ilists
+            # STRICT inequality to match FAISS:
+            idxs = np.flatnonzero(dist2[i] < radius)
+
+            if idxs.size and limit is not None and idxs.size > limit:
+                local = dist2[i, idxs]
+                part = np.argpartition(local, limit - 1)[:limit]
+                idxs = idxs[part]
+                order = np.argsort(dist2[i, idxs], kind="stable")
+                idxs = idxs[order]
+
+            D_chunks.append(dist2[i, idxs].astype(np.float32, copy=False))
+            I_chunks.append(ids[idxs].astype(np.int64, copy=False))
+
+            total += idxs.size
+            lims[i + 1] = total
+
+        if total == 0:
+            D_all = np.empty((0,), dtype=np.float32)
+            I_all = np.empty((0,), dtype=np.int64)
+        else:
+            D_all = np.concatenate(D_chunks, axis=0)
+            I_all = np.concatenate(I_chunks, axis=0)
+
+        return lims, D_all, I_all
 
     # Convenience: check internal consistency (used in tests)
     def _check_invariants(self) -> None:
@@ -280,18 +306,31 @@ def test_range_search_and_limit():
     xb = np.array([[0,0,0,0,0],[1,0,0,0,0],[2,0,0,0,0],[3,0,0,0,0]], dtype=np.float32, order="C")
     ids = np.array([10,11,12,13], dtype=np.int64)
     store.add_with_ids(xb, ids)
+    xq = np.array([[0.5,0,0,0,0]], dtype=np.float32, order="C")
+    lims, D, I = store.range_search(xq, radius=2.25)
+    assert lims.shape == (2,) and lims.dtype == np.int64
+    s = slice(lims[0], lims[1])
+    order = np.argsort(D[s], kind="stable")
+    assert np.array_equal(I[s][order], np.array([10,11], dtype=np.int64))
+    assert np.allclose(D[s][order], np.array([0.25,0.25], dtype=np.float32))
+    lims2, D2, I2 = store.range_search(xq, radius=2.25, limit=2)
+    s2 = slice(lims2[0], lims2[1])
+    assert np.array_equal(I2[s2], np.array([10,11], dtype=np.int64))
+    assert np.allclose(D2[s2], np.array([0.25,0.25], dtype=np.float32))
 
+def test_range_search_compare_to_faiss():
+    dim = 5
+    store = NaiveVectorStore(dim)
+    store_faiss = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
+    xb = np.array([[0,0,0,0,0],[1,0,0,0,0],[2,0,0,0,0],[3,0,0,0,0]], dtype=np.float32, order="C")
+    ids = np.array([10,11,12,13], dtype=np.int64)
+    store.add_with_ids(xb, ids)
+    store_faiss.add_with_ids(xb, ids)
     xq = np.array([[0.5,0,0,0,0]], dtype=np.float32, order="C")
     # squared distances to points: 0.25, 0.25, 2.25, 6.25
-    dl, il = store.range_search(xq, radius=2.25)  # include up to id=12
-    assert len(dl) == 1 and len(il) == 1
-    assert np.all(il[0] == np.array([10,11,12], dtype=np.int64))
-    assert np.allclose(dl[0], np.array([0.25,0.25,2.25], dtype=np.float32))
-
-    # with limit=2
-    dl2, il2 = store.range_search(xq, radius=2.25, limit=2)
-    assert np.all(il2[0] == np.array([10,11], dtype=np.int64))
-    assert np.allclose(dl2[0], np.array([0.25,0.25], dtype=np.float32))
+    lims, dist2, qids = store.range_search(xq, 2.25)
+    lims_faiss, dist2_faiss, qids_faiss = store_faiss.range_search(xq, 2.25)  # include up to id=12
+    assert np.array_equal(lims_faiss, lims) and np.array_equal(dist2_faiss, dist2) and np.array_equal(qids, qids_faiss)
 
 def test_update_heavy_stress():
     dim = 16
@@ -334,6 +373,7 @@ def run_all_tests():
         test_k_greater_than_n_and_empty,
         test_range_search_and_limit,
         test_update_heavy_stress,
+        test_range_search_compare_to_faiss
     ]
     t0 = time.time()
     for t in tests:
