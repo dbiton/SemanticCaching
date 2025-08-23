@@ -49,21 +49,17 @@ def greedy_cluster_faiss(embeds: np.ndarray, d: float) -> np.ndarray:
 def cluster_complete_linkage_faiss(embeds: np.ndarray, d: float) -> np.ndarray:
     n, dim = embeds.shape
     assert embeds.dtype == np.float32
-    radius_sq = d ** 2
 
-    # Step 1: FAISS range search for all neighbors within D
     index = faiss.IndexFlatL2(dim)
     index.add(embeds)
-    lims, _, indices = index.range_search(embeds, radius_sq)
+    lims, _, indices = index.range_search(embeds, d)
 
-    # Step 2: Build neighbor sets
     neighbors = [set(indices[lims[i]:lims[i+1]]) - {i} for i in range(n)]
 
-    # Step 3: Sort items by decreasing number of neighbors (degree)
     sorted_indices = sorted(range(n), key=lambda i: -len(neighbors[i]))
 
+    cluster_count = 0
     cluster_ids = np.full(n, -1, dtype=int)
-    current_cluster = 0
     assigned = set()
 
     for i in sorted_indices:
@@ -73,13 +69,13 @@ def cluster_complete_linkage_faiss(embeds: np.ndarray, d: float) -> np.ndarray:
         candidates = neighbors[i] - assigned
 
         for c in list(candidates):
-            if all(c in neighbors[member] for member in cluster):
+            if all(c in neighbors[member] for member in cluster): # only need each vector to be close enough to all vectors that come after it
                 cluster.add(c)
 
         for member in cluster:
-            cluster_ids[member] = current_cluster
+            cluster_ids[member] = cluster_count
         assigned.update(cluster)
-        current_cluster += 1
+        cluster_count += 1
 
     return cluster_ids
 
