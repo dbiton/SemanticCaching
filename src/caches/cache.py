@@ -6,7 +6,7 @@ import numpy as np
 from scipy.spatial import distance_matrix
 import faiss
 
-from util.surprisal import calculate_perplexity, calculate_surprisal
+from util.surprisal import calculate_surprisal
 from util.online_clusters import OnlineClusters
 from typing import List
 
