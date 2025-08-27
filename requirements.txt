@@ -8,3 +8,7 @@ matplotlib
 scipy
 lightgbm
 heapdict
+wordfreq
+xgboost
+pymilvus
+hnswlib
