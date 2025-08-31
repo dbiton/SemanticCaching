@@ -40,7 +40,7 @@ from caches.lru_k import LRUK
 from caches.OPT import OPT, ClusterOPT
 from vector_stores.milvus_interface import MilvusVectorStore
 from vector_stores.hnswlib_interface import HNSWVectorStore
-
+from processor import Processor
 
 # use only text, embeds - remove normalized embeds
 dataset_filenames = {
@@ -53,12 +53,6 @@ dataset_filenames = {
 }
 
 NUM_PROCS = 8
-
-
-def get_metrics(embeds: List[np.ndarray], texts: List[str]) -> Dict[str, float]:
-    metrics = {}
-    metrics["size"] = len(embeds)
-    return metrics
 
 
 def plot(dataset_name, results):
@@ -99,149 +93,6 @@ def load_embeds(dataset_name: str, N: int):
     embeds = np.array(data["normalized_embeds"][:N], dtype=np.float32)
     return embeds, embeds_texts
 
-
-def yield_batch_slices(total_size, batch_size):
-    for start in range(0, total_size, batch_size):
-        stop = min(start + batch_size, total_size)
-        yield slice(start, stop), list(range(start, stop))
-
-
-def get_flat_index_faiss(dim: int = 384):
-    return faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
-
-
-def get_hnsw_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
-    id = f"vector{uuid.uuid4()}".replace("-", "_")
-    return MilvusVectorStore(
-        uri=uri,
-        collection_name=id,
-        dim=dim,
-        metric_type="L2",
-        index_type="HNSW",
-        index_params={"M": 32, "efConstruction": 200},
-    )
-
-
-def get_flat_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
-    id = f"vector{uuid.uuid4()}".replace("-", "_")
-    return MilvusVectorStore(
-        uri=uri,
-        collection_name=id,
-        dim=dim,
-        metric_type="L2",
-        index_type="FLAT",
-        index_params={},  # FLAT has no extra params
-    )
-
-
-def get_hnsw_index_hnswlib(dim: int = 384):
-    return HNSWVectorStore(dim=dim)
-
-
-def get_flat_index_naive(dim: int = 384):
-    return NaiveVectorStore(dim=dim)
-
-
-def get_ivf_index_milvus(
-    uri: str = "http://localhost:19530", dim: int = 384, nlist: int = 10
-):
-    id = f"vector{uuid.uuid4()}".replace("-", "_")
-    return MilvusVectorStore(
-        uri=uri,
-        collection_name=id,
-        dim=dim,
-        metric_type="L2",
-        index_type="IVF_FLAT",
-        index_params={"nlist": int(nlist)},
-    )
-
-
-def run(args) -> None:
-    (
-        dataset_name,
-        cache_name,
-        index_name,
-        same_embed_distance,
-        num_samples,
-        cache_size,
-        batch_size,
-        count_nn,
-        progress_queue,
-    ) = args
-
-    
-    
-    total_embeds, total_embeds_texts = load_embeds(dataset_name, num_samples)
-
-    caches = {
-        "NaiveRVB": (OPT, same_embed_distance, total_embeds),
-        "ClusterRVB": (ClusterOPT, same_embed_distance, total_embeds),
-        "SurprisalLFU": (SurprisalLFU, same_embed_distance),
-        "Surprisal": (Surprisal, same_embed_distance),
-        "LFU": (LFU, same_embed_distance),
-        "LRU": (LRU, same_embed_distance),
-        "LRUK": (LRUK, same_embed_distance, 2),
-        "DALFU": (DynamicAgingLFU, same_embed_distance, 32),
-        "ARC": (ARC, same_embed_distance),
-        "ClusterLRU": (ClusterLRU, same_embed_distance),
-        "ClusterLFU": (ClusterLFU, same_embed_distance),
-        "DistanceLFU": (DistanceLFU, same_embed_distance),
-        "RAP": (RAP, same_embed_distance),
-        "SphereLFU": (SphereQueryLFU, same_embed_distance),
-    }
-    indices = {
-        "flat-milvus": get_flat_index_milvus,
-        "flat-faiss": get_flat_index_faiss,
-        "hnsw-hnswlib": get_hnsw_index_hnswlib,
-        "flat-naive": get_flat_index_naive,
-    }
-
-    index = indices[index_name]()
-
-    # Initialize cache
-    cache_tuple = caches[cache_name]
-    cache_constructor = cache_tuple[0]
-    cache_args = cache_tuple[1:]
-    cache = cache_constructor(*cache_args)
-    cache.initialize(cache_size, index)
-
-    t0 = time.time()
-
-    # consts
-    llm_call_time = 100
-    cache_access_time = 1
-
-    # Stats
-    total_hits = 0
-    at_least_1_hits = 0
-    simulated_runtime = 0
-    
-    for sl, i_embeds in yield_batch_slices(len(total_embeds), batch_size):
-        embeds = total_embeds[sl]
-        embeds_texts = total_embeds_texts[sl]
-        iter_cache_hits, _ = cache.request(embeds, i_embeds, count_nn, embeds_texts)
-        total_hits += np.sum(iter_cache_hits)
-        at_least_1_hits += len(np.where(iter_cache_hits > 0)[0])
-        if progress_queue is not None:
-            progress_queue.put(len(i_embeds))
-
-    fractional_recall_at_k = total_hits / (len(total_embeds) * count_nn)
-    binary_recall_at_k = at_least_1_hits / len(total_embeds)
-
-    iter_results = {
-        "Dataset": dataset_name,
-        "Index": index_name,
-        "Cache Name": cache_name,
-        "Recall@K": fractional_recall_at_k,
-        "AtLeast1@K": binary_recall_at_k,
-        "Runtime": time.time() - t0,
-        "Cache Size": cache_size,
-        "Same Embed Distance": same_embed_distance,
-        "Simulated Runtime": simulated_runtime
-    }
-    return iter_results
-
-
 def main():
     batch_size = 1
     count_nn = 1
@@ -256,28 +107,6 @@ def main():
 
     for dataset_name, _ in get_embeds_paths():
         print(f"processing {dataset_name}")
-
-        # feedback
-        num_batches = (
-            len(caches_names) * len(faiss_indices_names) * num_samples * COUNT_STEPS
-        )
-        pbar = tqdm.tqdm(
-            total=num_batches, desc=f"Processing {dataset_name}'s {num_batches} batches"
-        )
-        manager = mp.Manager()
-        progress_queue = manager.Queue()
-        stop_token = -1
-
-        def consumer(pbar):
-            while True:
-                item = progress_queue.get()
-                if item == -1:
-                    break
-                pbar.update(item)
-
-        t = threading.Thread(target=consumer, args=(pbar,), daemon=True)
-        t.start()
-        # feedback
 
         args = []
         for cache_name in caches_names:
@@ -296,7 +125,6 @@ def main():
                             cache_size,
                             batch_size,
                             count_nn,
-                            progress_queue,
                         )
                     )
 
@@ -318,8 +146,6 @@ def main():
                     if cache_name not in results[prop_name]:
                         results[prop_name][cache_name] = {}
                     results[prop_name][cache_name][cache_size] = prop
-        progress_queue.put(stop_token)
-        t.join()
         plot(dataset_name, results)
 
 def compare_crvb_and_nrvb():
@@ -328,7 +154,7 @@ def compare_crvb_and_nrvb():
     
     batch_size = 1
     count_nn = 1
-    num_samples = 10000
+    num_samples = 1000
     CAHCE_SIZE = 0.1
     dim = 384
     MIN_DIS = 0.5
@@ -338,37 +164,16 @@ def compare_crvb_and_nrvb():
     faiss_indices_names = {"flat-naive"}
     caches_names = {"NaiveRVB", "ClusterRVB"}
 
-    # feedback
-    num_batches = (
-        len(caches_names) * len(faiss_indices_names) * num_samples * COUNT_DIS * len(get_embeds_paths())
-    )
-    pbar = tqdm.tqdm(
-        total=num_batches, desc=f"Processing..."
-    )
-    manager = mp.Manager()
-    progress_queue = manager.Queue()
-    stop_token = -1
-
-    def consumer(pbar):
-        while True:
-            item = progress_queue.get()
-            if item == -1:
-                break
-            pbar.update(item)
-
-    t = threading.Thread(target=consumer, args=(pbar,), daemon=True)
-    t.start()
-    # feedback
-
+    processor = Processor(NUM_PROCS)
+    
     args = []
     for dataset_name, _ in get_embeds_paths():
         for same_embed_distance in np.linspace(MIN_DIS, MAX_DIS, COUNT_DIS):
             for cache_name in caches_names:
                 for index_name in faiss_indices_names:
                     cache_size = int(num_samples * CAHCE_SIZE)
-                    args.append(
-                        (
-                            dataset_name,
+                    processor.submit(
+                        dataset_name,
                             cache_name,
                             index_name,
                             same_embed_distance,
@@ -376,23 +181,10 @@ def compare_crvb_and_nrvb():
                             cache_size,
                             batch_size,
                             count_nn,
-                            progress_queue,
-                        )
+                            "results.json"
                     )
-
-    results = {}
-    Pool = ProcessPoolExecutor if NUM_PROCS > 1 else ThreadPoolExecutor
-    with Pool(NUM_PROCS) as executor:
-        futures = [executor.submit(run, arg) for arg in args]
-        for future in as_completed(futures):
-            result = future.result()
-            with open("results.json", "a") as f:
-                json.dump(result, f)
-                f.write('\n')
-    progress_queue.put(stop_token)
-    t.join()
-    plot(dataset_name, results)
-
+    processor.run()
+    
 def plot_compare_crvb_and_nrvb():
     df = []
     with open("results.json", "r") as f:
