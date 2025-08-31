@@ -69,8 +69,18 @@ def get_hnsw_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
         index_params={"M": 32, "efConstruction": 200},
     )
 
+def get_flat_index_milvus_lite(dim: int = 384):
+    id = f"vector{uuid.uuid4()}.db".replace("-", "_")
+    return MilvusVectorStore(
+        uri=id,
+        collection_name=id,
+        dim=dim,
+        metric_type="L2",
+        index_type="FLAT",
+        index_params={},  # FLAT has no extra params
+    )
 
-def get_flat_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
+def get_flat_index_milvus_standalone(uri: str = "http://localhost:19530", dim: int = 384):
     id = f"vector{uuid.uuid4()}".replace("-", "_")
     return MilvusVectorStore(
         uri=uri,
@@ -137,10 +147,10 @@ def _run_single_worker(args):
         "SphereLFU": (SphereQueryLFU, same_embed_distance),
     }
     indices = {
-        "flat-milvus": get_flat_index_milvus,
-        "flat-faiss": get_flat_index_faiss,
-        "hnsw-hnswlib": get_hnsw_index_hnswlib,
-        "flat-naive": get_flat_index_naive,
+        "milvus-lite": get_flat_index_milvus_lite,
+        "milvus-standalone": get_flat_index_milvus_standalone,
+        "faiss": get_flat_index_faiss,
+        "naive": get_flat_index_naive,
     }
 
     index = indices[index_name]()
@@ -164,11 +174,17 @@ def _run_single_worker(args):
     simulated_runtime = 0
 
     for sl, i_embeds in yield_batch_slices(len(total_embeds), batch_size):
+        simulated_runtime += cache_access_time
         embeds = total_embeds[sl]
         embeds_texts = total_embeds_texts[sl]
         iter_cache_hits, _ = cache.request(embeds, i_embeds, count_nn, embeds_texts)
         total_hits += np.sum(iter_cache_hits)
-        at_least_1_hits += len(np.where(iter_cache_hits > 0)[0])
+        reqs_hit = len(np.where(iter_cache_hits > 0)[0])
+        at_least_1_hits += reqs_hit
+        items_include = set(i_embeds).intersection(list(cache.items))
+        items_miss = set(np.array(i_embeds)[np.where(iter_cache_hits == 0)[0]])
+        items_llm = items_miss | items_include
+        simulated_runtime += len(items_llm) * llm_call_time
         if progress_queue is not None:
             try:
                 progress_queue.put(len(i_embeds))
@@ -191,6 +207,7 @@ def _run_single_worker(args):
         "Same Embed Distance": same_embed_distance,
         "Simulated Runtime": simulated_runtime,
         "Output Path": output_path,
+        "Batch Size": batch_size,
     }
     return iter_results
 
