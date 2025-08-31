@@ -1,9 +1,11 @@
+import heapq
+from typing import List, Set
 from sklearn.decomposition import PCA
 import itertools
 import faiss
 import numpy as np
 from collections import deque
-
+import networkx as nx
 def get_N_or_less_from_generator(stream, N):
     return list(itertools.islice(stream, N))
 
@@ -48,34 +50,48 @@ def greedy_cluster_faiss(embeds: np.ndarray, d: float) -> np.ndarray:
 
 def cluster_complete_linkage_faiss(embeds: np.ndarray, d: float) -> np.ndarray:
     n, dim = embeds.shape
-    assert embeds.dtype == np.float32
+    assert embeds.dtype == np.float32 and embeds.flags['C_CONTIGUOUS']
+    r2 = float(d * d)  # FAISS uses squared L2
 
     index = faiss.IndexFlatL2(dim)
     index.add(embeds)
-    lims, _, indices = index.range_search(embeds, d)
+    lims, _, idx = index.range_search(embeds, r2)  # strict < r2 inside FAISS
 
-    neighbors = [set(indices[lims[i]:lims[i+1]]) - {i} for i in range(n)]
+    # Build neighbor sets INCLUDING self to simplify intersections
+    neighbors = [set(idx[lims[i]:lims[i+1]]) | {i} for i in range(n)]
+    deg = np.fromiter((len(s) - 1 for s in neighbors), count=n, dtype=np.int32)
 
-    sorted_indices = sorted(range(n), key=lambda i: -len(neighbors[i]))
+    # Process low-degree vertices first (shrinks eligible sets faster)
+    order = np.argsort(deg)  # ascending degree
 
-    cluster_count = 0
-    cluster_ids = np.full(n, -1, dtype=int)
-    assigned = set()
+    cluster_ids = -np.ones(n, dtype=np.int64)
+    assigned: set[int] = set()
+    cid = 0
 
-    for i in sorted_indices:
+    for i in order:
         if i in assigned:
             continue
+
         cluster = {i}
-        candidates = neighbors[i] - assigned
+        # Start with all neighbors of i (including i), remove already assigned
+        eligible = neighbors[i] - assigned
 
-        for c in list(candidates):
-            if all(c in neighbors[member] for member in cluster): # only need each vector to be close enough to all vectors that come after it
-                cluster.add(c)
+        # Repeatedly add a vertex that is compatible with everything chosen so far.
+        # Compatibility is guaranteed by intersecting eligibility with its neighbors.
+        while True:
+            # don't reconsider current cluster members
+            eligible -= cluster
+            if not eligible:
+                break
+            # Heuristic: pick the smallest-degree vertex in the current eligible set
+            c = min(eligible, key=deg.__getitem__)
+            cluster.add(c)
+            eligible &= neighbors[c]   # tighten to vertices adjacent to all in cluster
 
-        for member in cluster:
-            cluster_ids[member] = cluster_count
+        for u in cluster:
+            cluster_ids[u] = cid
         assigned.update(cluster)
-        cluster_count += 1
+        cid += 1
 
     return cluster_ids
 
@@ -125,3 +141,52 @@ def cluster_embeddings_faiss(embeds: np.ndarray, d: float) -> np.ndarray:
         current_cluster += 1
 
     return cluster_ids
+
+
+def cluster_by_coloring_dsat_faiss_heap(
+    embeds: np.ndarray,
+    d: float,
+    strategy: str = "DSATUR"
+) -> np.ndarray:
+    n, dim = embeds.shape
+    assert embeds.dtype == np.float32 and embeds.flags['C_CONTIGUOUS']
+
+    # Build neighbor graph G with strict radius (< d^2)
+    index = faiss.IndexFlatL2(dim)
+    index.add(embeds)
+    lims, D, I = index.range_search(embeds, float(d) * float(d))
+
+    # Normalize FAISS outputs to numpy arrays
+    lims = np.asarray(lims, dtype=np.int64)
+    D    = np.asarray(D,    dtype=np.float32)
+    I    = np.asarray(I,    dtype=np.int64)
+
+    r2 = float(d) * float(d)
+    G = nx.Graph()
+    G.add_nodes_from(range(n))
+
+    # Add edges (i, j) when dist^2 < r2, j > i to avoid duplicates
+    for i in range(n):
+        start, end = int(lims[i]), int(lims[i + 1])
+        for off in range(start, end):
+            j = int(I[off])
+            if j == i:
+                continue
+            if D[off] < r2 and j > i:
+                G.add_edge(i, j)
+
+    # Color the complement graph using DSATUR
+    H = nx.complement(G)
+    coloring = nx.algorithms.coloring.greedy_color(H, strategy=strategy)
+
+    # Convert dict->array; normalize colors to 0..C-1 in order of first appearance
+    assign = np.empty(n, dtype=int)
+    remap = {}
+    next_c = 0
+    for v in range(n):
+        c = int(coloring[v])
+        if c not in remap:
+            remap[c] = next_c
+            next_c += 1
+        assign[v] = remap[c]
+    return assign

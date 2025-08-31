@@ -73,7 +73,8 @@ class OPT(Cache):
             embed_next_hit = embeds_next_hits[embed_id] 
             max_next_hit_embed_id = max(self.items, key=self.items.get, default=None)
             max_next_hit = self.items.get(max_next_hit_embed_id, float('inf'))
-            if self.capacity > self.size() or (embed_next_hit < max_next_hit and embed_next_hit not in self.items.values()):
+            covered_hits = set(sum([list(self.embeds_covers[i]) for i in self.items], []))
+            if self.capacity > self.size() or (embed_next_hit < max_next_hit and embed_next_hit not in covered_hits):
                 if self.capacity <= self.size():
                     evicted_items.append(max_next_hit_embed_id)
                     self.items.pop(max_next_hit_embed_id)
@@ -309,6 +310,12 @@ class ClusterOPT(Cache):
             next_hits[embed_id] = next_hit
         return next_hits
 
+    def get_combined_next_hits(self, embeds_ids):
+        next_hits = self.get_next_hits(embeds_ids)
+        cluster_next_hits = self.get_cluster_next_hits(embeds_ids)
+        combined_hits = {eid: (cluster_next_hits[eid], next_hits[eid]) for eid in embeds_ids}
+        return combined_hits
+    
     # reject items from covered clusters (if possible?)
     # when evicting, evict entry with furthest next hit for cluster with furthest next hit (should just be )    
     def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
@@ -319,16 +326,15 @@ class ClusterOPT(Cache):
         additions = []
         self.curr_embed_id = max(embeds_ids)
         
-        stale_items = [eid for (eid, next_hit) in self.items.items() if next_hit <= self.curr_embed_id]
+        stale_items = [eid for (eid, (cluster_next_hit, next_hit)) in self.items.items() if next_hit <= self.curr_embed_id]
         if len(stale_items) > 0:
-            self.items.update(self.get_next_hits(stale_items))
+            self.items.update(self.get_combined_next_hits(stale_items))
         
-        embeds_next_hits = self.get_next_hits(embeds_ids)
+        embeds_next_hits = self.get_combined_next_hits(embeds_ids)
         for embed, embed_id in zip(embeds, embeds_ids):
             embed_next_hit = embeds_next_hits[embed_id] 
             max_next_hit_embed_id = max(self.items, key=self.items.get, default=None)
-            max_next_hit = self.items.get(max_next_hit_embed_id, float('inf'))
-            # embed_cluster_is_covered = self.embeds_clusters[embed_id] in [self.embeds_clusters[eid] for eid in self.items]
+            max_next_hit = self.items.get(max_next_hit_embed_id, (float('inf'), float('inf')))
             covered_hits = set(sum([list(self.embeds_covers[i]) for i in self.items], []))
             embed_next_hit_is_covered = embed_next_hit in covered_hits
             if self.capacity > self.size() or (not embed_next_hit_is_covered and embed_next_hit <= max_next_hit):
