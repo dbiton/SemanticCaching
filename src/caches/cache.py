@@ -348,49 +348,65 @@ class DistanceLFU(Cache):
         return cache_hits, evicted_items
 
 class DynamicAgingLFU(Cache):
-    def __init__(self, same_embed_distance, half_life: int):
+    """
+    LFUDA (LFU with Dynamic Aging):
+      - Global age L starts at 0.
+      - Each item keeps a 'key' that effectively equals (reference_count + L_at_last_touch).
+      - On hit: key += 1
+      - On insert: key = L + 1
+      - Evict min-key; set L = evicted_key (dynamic aging).
+      - Invariant: L <= min_key_in_cache.
+    """
+    def __init__(self, same_embed_distance, half_life: int = None):
+        # 'half_life' kept only for API compatibility. LFUDA does not use exponential decay.
         super().__init__(same_embed_distance)
-        self.decay = pow(0.5, 1 / half_life)
+        self.L = 0.0
+        self.half_life = half_life
 
     def initialize(self, capacity: int, index):
-        self.items = {}
+        self.items = {}   # embed_id -> key (float)
+        self.L = 0.0
         super().initialize(capacity, index)
-    
-    def decay_counters(self):
-        for key in self.items:
-            self.items[key] *= self.decay
-    
+
     def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
-        self.decay_counters()        
+        # 1) Query current index to find hits
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
         cache_hits = np.count_nonzero(mask, axis=1)
+
         evicted_items = []
         additions_embeds = []
         additions_ids = []
-        count_remove = max(0, (len(embeds) + self.size()) - self.capacity)
+
+        # 2) Re-references: increment key by 1 (key already included L when last touched)
         for i_embed, i_nn in zip(*cache_hits_indices):
             cand = closest_ids[i_embed][i_nn]
-            self.items[cand] += 1
+            if cand in self.items:         # defensive guard
+                self.items[cand] += 1.0
 
+        # 3) Evict enough to make room for all incoming inserts
         needed_space = len(embeds)
         current_size = self.size()
         count_remove = max(0, (current_size + needed_space) - self.capacity)
-        if count_remove > 0:
-            least_used = heapq.nsmallest(count_remove, self.items.items(), key=lambda x: x[1])
-            for embed_id, _ in least_used:
-                del self.items[embed_id]
-                evicted_items.append(embed_id)
+        for _ in range(count_remove):
+            evict_id, evict_key = min(self.items.items(), key=lambda kv: kv[1])
+            self.L = float(evict_key)      # dynamic aging; maintains L <= min_key_in_cache
+            del self.items[evict_id]
+            evicted_items.append(evict_id)
 
+        # 4) Admit all new objects with key = L + 1 (adds cache-age factor on admission)
         for embed_id, embed in zip(embeds_ids, embeds):
-            self.items[embed_id] = 1
+            self.items[embed_id] = self.L + 1.0
             additions_embeds.append(embed)
             additions_ids.append(embed_id)
+
+        # 5) Sync to underlying vector index
         if evicted_items:
             self.remove_ids(np.array(evicted_items))
         if additions_ids:
             self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+
         return cache_hits, evicted_items
 
 class LRU(Cache):
