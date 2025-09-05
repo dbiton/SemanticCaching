@@ -73,7 +73,7 @@ class OPT(Cache):
             embed_next_hit = embeds_next_hits[embed_id] 
             max_next_hit_embed_id = max(self.items, key=self.items.get, default=None)
             max_next_hit = self.items.get(max_next_hit_embed_id, float('inf'))
-            covered_hits = set(sum([list(self.embeds_covers[i]) for i in self.items], []))
+            covered_hits = set().union(*(self.embeds_covers[i] for i in self.items))
             if self.capacity > self.size() or (embed_next_hit < max_next_hit and embed_next_hit not in covered_hits):
                 if self.capacity <= self.size():
                     evicted_items.append(max_next_hit_embed_id)
@@ -335,7 +335,7 @@ class ClusterOPT(Cache):
             embed_next_hit = embeds_next_hits[embed_id] 
             max_next_hit_embed_id = max(self.items, key=self.items.get, default=None)
             max_next_hit = self.items.get(max_next_hit_embed_id, (float('inf'), float('inf')))
-            covered_hits = set(sum([list(self.embeds_covers[i]) for i in self.items], []))
+            covered_hits = set().union(*(self.embeds_covers[i] for i in self.items))
             embed_next_hit_is_covered = embed_next_hit in covered_hits
             if self.capacity > self.size() or (not embed_next_hit_is_covered and embed_next_hit <= max_next_hit):
                 if self.capacity <= self.size():
