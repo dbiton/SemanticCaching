@@ -50,22 +50,22 @@ class HNSWVectorStore:
         allow_replace_delete: bool = False,
         num_threads: Optional[int] = None,
     ):
+        # If True, add_items can reuse deleted labels (faster steady-state updates)
+        self.allow_replace_delete = allow_replace_delete
+        
         self.dim = int(dim)
         self.space = space
         self._index = hnswlib.Index(space=space, dim=dim)
         self._index.init_index(
             max_elements=int(max_elements),
-            ef_construction=int(ef_construction),
             M=int(M),
+            ef_construction=int(ef_construction),
             random_seed=42,
-            # allow_replace_delete=self.allow_replace_delete
+            allow_replace_deleted=self.allow_replace_delete
         )
         self._index.set_ef(int(ef))
         if num_threads is not None:
             self._index.set_num_threads(int(num_threads))
-
-        # If True, add_items can reuse deleted labels (faster steady-state updates)
-        self.allow_replace_delete = allow_replace_delete
 
         # We keep an optional id->vector map to support rebuild() and range_search caps.
         # (hnswlib cannot enumerate vectors by id)
@@ -79,6 +79,7 @@ class HNSWVectorStore:
     # ----------------------- Public API (FAISS-like) -----------------------
 
     def add_with_ids(self, x: np.ndarray, ids: Union[np.ndarray, List[int]]) -> None:
+        self.check_rebuild()
         x = self._as_float32_2d(x)
         ids = self._as_int64_1d(ids)
         if len(ids) != len(x):
@@ -95,6 +96,7 @@ class HNSWVectorStore:
                 self._live_count += 1
 
     def remove_ids(self, ids: Union[np.ndarray, List[int]]) -> int:
+        self.check_rebuild()
         ids = self._as_int64_1d(ids)
         removed = 0
         with self._lock:
@@ -128,7 +130,8 @@ class HNSWVectorStore:
             self._index.set_ef(int(search_params["ef"]))
 
         # hnswlib returns (labels, distances)
-        labels, distances = self._index.knn_query(xq, k=int(k))
+        actual_k = min(k, self.ntotal())
+        labels, distances = self._index.knn_query(xq, k=int(actual_k))
 
         # Convert to FAISS order: (D, I)
         I = labels.astype(np.int64, copy=False)
@@ -181,6 +184,13 @@ class HNSWVectorStore:
 
     # --------------------------- Maintenance ops ---------------------------
 
+    def check_rebuild(self) -> bool:
+        deleted_frac = len(self._deleted) / (1+(self.ntotal() + len(self._deleted)))
+        if deleted_frac >= 0.25:
+            self.rebuild()
+            return True
+        return False
+        
     def set_ef(self, ef: int) -> None:
         self._index.set_ef(int(ef))
 
@@ -229,7 +239,7 @@ class HNSWVectorStore:
 
             new_index = hnswlib.Index(space=self.space, dim=self.dim)
             new_index.init_index(max_elements=max(len(ids), self._index.get_max_elements()),
-                                 M=M_use, ef_construction=efc_use)
+                                 M=M_use, ef_construction=efc_use, allow_replace_deleted=self.allow_replace_delete)
 
             new_index.add_items(xb, ids, replace_deleted=self.allow_replace_delete)
 

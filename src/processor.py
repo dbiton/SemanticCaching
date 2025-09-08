@@ -14,6 +14,7 @@ from caches.cache import (
     LFU,
     LRU,
     DistanceLFU,
+    MissLFU,
     SphereQueryLFU,
     Surprisal,
     SurprisalLFU,
@@ -57,7 +58,6 @@ def load_embeds(dataset_name: str, N: int):
     embeds = np.array(data["normalized_embeds"][:N], dtype=np.float32)
     return embeds, embeds_texts
 
-
 def get_hnsw_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
     id = f"vector{uuid.uuid4()}".replace("-", "_")
     return MilvusVectorStore(
@@ -93,7 +93,12 @@ def get_flat_index_milvus_standalone(uri: str = "http://localhost:19530", dim: i
 
 
 def get_hnsw_index_hnswlib(dim: int = 384):
-    return HNSWVectorStore(dim=dim)
+    return HNSWVectorStore(
+        dim=dim,
+        M=16,
+        ef_construction=200,
+        allow_replace_delete=True
+    )
 
 
 def get_flat_index_naive(dim: int = 384):
@@ -131,6 +136,7 @@ def _run_single_worker(args):
     total_embeds, total_embeds_texts = load_embeds(dataset_name, num_samples)
 
     caches = {
+        "MissLFU": (MissLFU, same_embed_distance),
         "NaiveRVB": (OPT, same_embed_distance, total_embeds),
         "ClusterRVB": (ClusterOPT, same_embed_distance, total_embeds),
         "SurprisalLFU": (SurprisalLFU, same_embed_distance),
@@ -150,7 +156,8 @@ def _run_single_worker(args):
         "milvus-lite": get_flat_index_milvus_lite,
         "milvus-standalone": get_flat_index_milvus_standalone,
         "faiss": get_flat_index_faiss,
-        "naive": get_flat_index_naive,
+        "HotSwap": get_flat_index_naive,
+        "hnswlib": get_hnsw_index_hnswlib
     }
 
     index = indices[index_name]()
@@ -193,14 +200,14 @@ def _run_single_worker(args):
                 pass
 
     fractional_recall_at_k = total_hits / (len(total_embeds) * count_nn)
-    binary_recall_at_k = at_least_1_hits / len(total_embeds)
+    hit_rate = at_least_1_hits / len(total_embeds)
     runtime = time.time() - t0
     iter_results = {
         "Dataset": dataset_name,
         "Index": index_name,
         "Cache Name": cache_name,
         "Recall@K": fractional_recall_at_k,
-        "Hit Rate": binary_recall_at_k,
+        "Hit Rate": hit_rate,
         "Runtime": runtime,
         "Throughput": num_samples / runtime,
         "Cache Size": cache_size,

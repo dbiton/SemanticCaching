@@ -158,7 +158,6 @@ class LFU(Cache):
         for i_embed, i_nn in zip(*cache_hits_indices):
             cand = closest_ids[i_embed][i_nn]
             self.items[cand] += 1
-
         needed_space = len(embeds)
         current_size = self.size()
         count_remove = max(0, (current_size + needed_space) - self.capacity)
@@ -168,6 +167,49 @@ class LFU(Cache):
                 del self.items[embed_id]
                 evicted_items.append(embed_id)
         for embed_id, embed in zip(embeds_ids, embeds):
+            self.items[embed_id] = 0
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
+        if len(evicted_items) > 0:
+            self.remove_ids(evicted_items)
+        if additions_ids:
+            self.add_with_ids(additions_embeds, additions_ids)
+        return cache_hits, evicted_items
+
+class MissLFU(Cache):
+    def __init__(self, same_embed_distance):
+        super().__init__(same_embed_distance)
+
+    def initialize(self, capacity: int, index):
+        # Use a dict mapping embed_id -> frequency (access count)
+        self.items = {}
+        super().initialize(capacity, index)
+
+    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.count_nonzero(mask, axis=1)
+        evicted_items = []
+        additions_embeds = []
+        additions_ids = []
+        embeds_ids_cand = set(embeds_ids)
+        for i_embed, i_nn in zip(*cache_hits_indices):
+            cand = closest_ids[i_embed][i_nn]
+            embed_id = embeds_ids[i_embed]
+            self.items[cand] += 1
+            embeds_ids_cand.discard(embed_id)
+        needed_space = len(embeds_ids_cand)
+        current_size = self.size()
+        count_remove = max(0, (current_size + needed_space) - self.capacity)
+        if count_remove > 0:
+            least_used = heapq.nsmallest(count_remove, self.items.items(), key=lambda x: x[1])
+            for embed_id, _ in least_used:
+                del self.items[embed_id]
+                evicted_items.append(embed_id)
+        for embed_id, embed in zip(embeds_ids, embeds):
+            if embed_id not in embeds_ids_cand:
+                continue
             self.items[embed_id] = 0
             additions_embeds.append(embed)
             additions_ids.append(embed_id)
