@@ -50,7 +50,7 @@ class ARC(Cache):
         self.index    = index
 
     # ------------------------------------------------------------------ #
-    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+    def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, _ = self.get_closest_stored_embeds(embeds, 1)
         cache_hits = (closest_dists[:, 0] < self.same_embed_distance).astype(int)
 

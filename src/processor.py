@@ -21,6 +21,9 @@ from caches.cache import (
     DynamicAgingLFU,
     ClusterLFU,
     RAP,
+    RR,
+    FIFO,
+    LIFO
 )
 from caches.arc import ARC
 from caches.cluster_lru import ClusterLRU
@@ -141,6 +144,9 @@ def _run_single_worker(args):
         "ClusterRVB": (ClusterOPT, same_embed_distance, total_embeds),
         "SurprisalLFU": (SurprisalLFU, same_embed_distance),
         "Surprisal": (Surprisal, same_embed_distance),
+        "LIFO": (LIFO, same_embed_distance),
+        "FIFO": (FIFO, same_embed_distance),
+        "RR": (RR, same_embed_distance),
         "LFU": (LFU, same_embed_distance),
         "LRU": (LRU, same_embed_distance),
         "LRUK": (LRUK, same_embed_distance, 2),
@@ -169,7 +175,7 @@ def _run_single_worker(args):
     cache = cache_constructor(*cache_args)
     cache.initialize(cache_size, index)
 
-    t0 = time.time()
+    runtime = 0
 
     # consts (simulated)
     llm_call_time = 100
@@ -179,12 +185,17 @@ def _run_single_worker(args):
     total_hits = 0
     at_least_1_hits = 0
     simulated_runtime = 0
-
+    total_hit_distance = 0
+    
     for sl, i_embeds in yield_batch_slices(len(total_embeds), batch_size):
         simulated_runtime += cache_access_time
         embeds = total_embeds[sl]
         embeds_texts = total_embeds_texts[sl]
-        iter_cache_hits, _ = cache.request(embeds, i_embeds, count_nn, embeds_texts)
+        _, cache_hits_dists = cache.get_cache_hits(embeds, count_nn)
+        total_hit_distance += sum([sum(dists) for dists in cache_hits_dists])
+        time_start = time.perf_counter()
+        iter_cache_hits, _ = cache.cache(embeds, i_embeds, count_nn, embeds_texts)
+        runtime += time.perf_counter() - time_start
         total_hits += np.sum(iter_cache_hits)
         reqs_hit = len(np.where(iter_cache_hits > 0)[0])
         at_least_1_hits += reqs_hit
@@ -201,7 +212,7 @@ def _run_single_worker(args):
 
     fractional_recall_at_k = total_hits / (len(total_embeds) * count_nn)
     hit_rate = at_least_1_hits / len(total_embeds)
-    runtime = time.time() - t0
+    mean_hit_distance = total_hit_distance / total_hits if total_hits > 0 else 0
     iter_results = {
         "Dataset": dataset_name,
         "Index": index_name,
@@ -215,6 +226,7 @@ def _run_single_worker(args):
         "Simulated Runtime": simulated_runtime,
         "Output Path": output_path,
         "Batch Size": batch_size,
+        "Mean Hit Distance": mean_hit_distance
     }
     return iter_results
 

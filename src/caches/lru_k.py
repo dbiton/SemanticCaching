@@ -24,7 +24,7 @@ class LRUK(Cache):
             return -1
         return h[0]
 
-    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+    def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         hits_mask = closest_dists < self.same_embed_distance
         cache_hits = np.count_nonzero(hits_mask, axis=1)

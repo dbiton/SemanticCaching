@@ -31,7 +31,7 @@ class ClusterLRU(Cache):
             self.cluster_recency[cid] = None
 
     # -----------------------------------------------------------------
-    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+    def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
         # ---------- 1. detect hits ------------------------------------
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask        = closest_dists < self.same_embed_distance

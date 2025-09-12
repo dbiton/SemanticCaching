@@ -17,7 +17,7 @@ class LRFU(Cache):
         dt = self.time - last_access_time
         return crf * np.exp(-self.decay_coe * dt)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def cache(self, embeds, embeds_ids, count_nn=1):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         mask = closest_dists < self.same_embed_distance
         cache_hits_indices = np.where(mask)
@@ -59,8 +59,8 @@ class HillClimbingLRFU(LRFU):
         self.window_counter = 0
         self.hill_climber = HillClimber(max_val=1, initial_value=self.decay_coe)
 
-    def request(self, embeds, embeds_ids, count_nn=1, texts = []):
-        cache_hits, evicted_items = super().request(embeds, embeds_ids, count_nn)
+    def cache(self, embeds, embeds_ids, count_nn=1, texts = []):
+        cache_hits, evicted_items = super().cache(embeds, embeds_ids, count_nn)
         self.window_counter += len(embeds)
         self.window_hits += np.count_nonzero(cache_hits)
         if self.window_counter >= self.window_size:
@@ -77,6 +77,6 @@ class DeltaLRFU(LRFU):
         self.lambda_delta = lambda_delta
         super().__init__(same_embed_distance, decay_coe)
 
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def cache(self, embeds, embeds_ids, count_nn=1):
         self.decay_coe += self.lambda_delta * len(embeds) 
-        return super().request(embeds, embeds_ids, count_nn)
+        return super().cache(embeds, embeds_ids, count_nn)

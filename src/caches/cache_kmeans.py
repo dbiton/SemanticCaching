@@ -53,7 +53,7 @@ class CacheKMeans(Cache):
                 if clusters[key]:
                     heappush(heap, (len(clusters[key]), key))
             
-    def request(self, embeds, embeds_ids, count_nn=1):
+    def cache(self, embeds, embeds_ids, count_nn=1):
         closest_dists, closest_ids = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.zeros((len(embeds), count_nn), dtype=bool)
         evicted_items = []

@@ -22,12 +22,12 @@ dataset_filenames = {
     "StackOverflow": "datasets/embeds_stackoverflow.pkl",
 }
 
-NUM_PROCS = 1
+NUM_PROCS = 2
 
 
 def plot():
     df = []
-    with open("results-recall.json", "r") as f:
+    with open("results.json", "r") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -57,6 +57,7 @@ def plot():
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
+            plt.yscale("log")
             figures_dir = "figures"
             plt.savefig(os.path.join(figures_dir, f"{prop_name}_{dataset_name}.png"))
 
@@ -77,7 +78,7 @@ def load_embeds(dataset_name: str, N: int):
 def recall():
     batch_size = 1
     count_nn = 10
-    num_samples = 100000
+    num_samples = 1000000
     MAX_CACHE_SIZE = 0.1
     COUNT_STEPS = 10
     dim = 384
@@ -127,16 +128,16 @@ def recall():
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 10000
+    num_samples = 1000
     MAX_CACHE_SIZE = 0.1
     COUNT_STEPS = 10
     dim = 384
-    same_embed_distance = 0.75
+    same_embed_distance = 0.5
 
     faiss_indices_names = {"HotSwap"}
     caches_names = {
         "NaiveRVB",
-        #"ClusterRVB",
+        "ClusterRVB",
         "SurprisalLFU",
         "Surprisal",
         "LFU",
@@ -147,6 +148,8 @@ def main():
         "ARC",
         #"ClusterLRU",
         #"ClusterLFU",
+        "FIFO",
+        "LIFO",
         "DistanceLFU",
         "RAP",
         "SphereLFU",
@@ -203,7 +206,7 @@ def compare_crvb():
                         cache_size,
                         batch_size,
                         count_nn,
-                        "results.json",
+                        "results-crvb.json",
                     )
     processor.run()
 
@@ -213,9 +216,9 @@ def compare_batch_size():
     MAX_BATCH_SIZE = 16
     COUNT_BATCH_SIZE = 10
     count_nn = 1
-    num_samples = 1000
+    num_samples = 250000
     CACHE_RATIO = 0.1
-    SAME_EMBED_DISTANCE = 0.75
+    SAME_EMBED_DISTANCE = 0.5
 
     faiss_indices_names = {"HotSwap", "faiss", "milvus-standalone", "hnswlib"}  # more indices? HNSW?
     caches_names = {"LFU"}
@@ -272,12 +275,34 @@ def plot_compare_batch_size():
     plt.tight_layout()
     figures_dir = "figures"
     plt.savefig(os.path.join(figures_dir, "batch-size.png"))
+    plt.close()
+    
+    for i, index_name in enumerate(set(df["Index"])):
+        df_index = df[(df["Index"] == index_name)]
+        index_runtime = df_index.groupby("Batch Size", as_index=False)[
+            "Hit Rate"
+        ].mean()
+        plt.plot(
+            index_runtime["Batch Size"],
+            index_runtime["Hit Rate"],
+            label=index_name,
+            marker=markers[i % len(linestyles)],
+            linestyle=linestyles[i % len(linestyles)],
+        )
+    plt.xlabel("Batch Size")
+    plt.ylabel("Hit Rate")
+    plt.yscale("log")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    figures_dir = "figures"
+    plt.savefig(os.path.join(figures_dir, "hit-rate.png"))
 
 
 def compare_index_runtime():
     batch_size = 1
     count_nn = 1
-    num_samples = 20000
+    num_samples = 1000000
     MIN_CACHE_RATIO = 0.01
     MAX_CACHE_RATIO = 0.1
     COUNT_RATIOS = 11
@@ -342,7 +367,7 @@ def plot_compare_index_runtime():
 
 def plot_compare_crvb():
     df = []
-    with open("results.json", "r") as f:
+    with open("results-crvb.json", "r") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -395,16 +420,17 @@ def plot_compare_crvb():
     plt.tight_layout()
     plt.savefig(os.path.join(figures_dir, f"ratio_lfu.png"))
 
-import hnswlib
-
 if __name__ == "__main__":
     mv = MilvusVectorStore()
     mv.drop_all()
     #recall()
+    main()
     #plot()
-    compare_batch_size()
-    plot_compare_batch_size()
-    # compare_index_runtime()
-    # plot_compare_index_runtime()
+    
+    #compare_batch_size()
+    #plot_compare_batch_size()
+    
+    #compare_index_runtime()
+    #plot_compare_index_runtime()
     # compare_crvb()
     # plot_compare_crvb()

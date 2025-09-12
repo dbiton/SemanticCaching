@@ -221,7 +221,7 @@ def test_policy():
                 next_i_embed = i_embeds[-1]
                 embeds_texts = [v for (_, v) in batch_embeds]
                 embeds_embeds = np.array([v for (v, _) in batch_embeds])
-                iter_cache_hits, evicted_embeds_ids = cache.request(embeds_embeds, i_embeds, COUNT_NN, embeds_texts)
+                iter_cache_hits, evicted_embeds_ids = cache.cache(embeds_embeds, i_embeds, COUNT_NN, embeds_texts)
                 if len(evicted_embeds_ids) > 0:
                     count_evicts += len(evicted_embeds_ids)
                     next_hits = get_next_hits(embeds_covers, next_i_embed, evicted_embeds_ids) - i_embeds[-1]

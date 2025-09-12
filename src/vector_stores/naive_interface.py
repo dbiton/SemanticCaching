@@ -172,7 +172,8 @@ class NaiveVectorStore:
         * If limit is not None: keep the smallest `limit` distances per query (sorted asc).
         """
         assert isinstance(xq, np.ndarray) and xq.ndim == 2 and xq.shape[1] == self.dim and xq.dtype == np.float32 and xq.flags['C_CONTIGUOUS']
-        assert isinstance(radius, (float, np.floating)) and radius >= 0.0
+        assert isinstance(radius, (int, float, np.integer, np.floating)) and float(radius) >= 0.0
+        radius = float(radius)
 
         n = self._size
         nq = xq.shape[0]

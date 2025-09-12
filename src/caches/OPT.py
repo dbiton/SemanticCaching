@@ -56,7 +56,7 @@ class OPT(Cache):
             next_hits[embed_id] = next_hit
         return next_hits
     
-    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+    def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
@@ -144,7 +144,7 @@ class CoverOPT(Cache):
         return evict_id
             
     
-    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+    def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
@@ -208,7 +208,7 @@ class ClusterRelaxedOPT(Cache):
             next_hits[embed_id] = next_hit
         return next_hits
     
-    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+    def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
@@ -318,7 +318,7 @@ class ClusterOPT(Cache):
     
     # reject items from covered clusters (if possible?)
     # when evicting, evict entry with furthest next hit for cluster with furthest next hit (should just be )    
-    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+    def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
@@ -393,7 +393,7 @@ class RelaxedOPT(Cache):
             next_hits[embed_id] = next_hit
         return next_hits
     
-    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+    def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
         evicted_items = []
@@ -745,7 +745,7 @@ class RelaxedLearnedOPT(Cache):
         self.reg.record_for_training(np.array(embeds_ids), np.array(embeds), embeds_texts, self.curr_embed_id)
         
     
-    def request(self, embeds, embeds_ids, count_nn=1, texts=[]):
+    def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, cache_hits_ids = self.get_closest_stored_embeds(embeds, count_nn)
         self.curr_embed_id = max(embeds_ids)
         mask = closest_dists < self.same_embed_distance
@@ -796,8 +796,8 @@ if __name__ == "__main__":
     copt = ClusterOPT(1, embeds)
     copt.initialize(2, index_copt)
     for i_embed, embed in enumerate(embeds):
-        res_copt = copt.request(np.array([embed]), list(i_embed))
-        res_opt = opt.request(np.array([embed]), list(i_embed))
+        res_copt = copt.cache(np.array([embed]), list(i_embed))
+        res_opt = opt.cache(np.array([embed]), list(i_embed))
         x = 3
         
         
