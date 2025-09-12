@@ -1,13 +1,12 @@
 from collections import defaultdict
 from typing import Optional, Dict, Set, Tuple
-import faiss
 import numpy as np
-
+from src.vector_stores.naive_interface import NaiveVectorStore
 # Check about removing from index bug!
 class OnlineClusters:
     def __init__(self, cluster_distance: float, dim: int):
         self.cluster_distance_sqrd = cluster_distance ** 2
-        self.index = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
+        self.index = NaiveVectorStore(dim)
         self.vectors_ids_to_clusters_ids: Dict[int, int] = {}
         self.clusters_ids_to_vectors_ids: Dict[int, Set[int]] = defaultdict(set)
 
