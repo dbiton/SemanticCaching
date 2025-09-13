@@ -226,6 +226,7 @@ def _run_single_worker(args):
         "Simulated Runtime": simulated_runtime,
         "Output Path": output_path,
         "Batch Size": batch_size,
+        "Count NN": count_nn,
         "Mean Hit Distance": mean_hit_distance
     }
     return iter_results

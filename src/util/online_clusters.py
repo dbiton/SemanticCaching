@@ -28,7 +28,7 @@ class OnlineClusters:
     def add_vector(self, vector: np.ndarray, vector_id: int) -> int:
         cluster_id = self.__get_cluster(vector)
         if cluster_id is None:
-            self.index.add_with_ids(np.array([vector]), np.array([vector_id]))
+            self.index.add_with_ids(np.array([vector]), np.array([vector_id], dtype=np.int64))
             cluster_id = vector_id
         self.vectors_ids_to_clusters_ids[vector_id] = cluster_id
         self.clusters_ids_to_vectors_ids[cluster_id].add(vector_id)

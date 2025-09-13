@@ -22,7 +22,7 @@ dataset_filenames = {
     "StackOverflow": "datasets/embeds_stackoverflow.pkl",
 }
 
-NUM_PROCS = 2
+NUM_PROCS = 1
 
 
 def plot():
@@ -128,7 +128,7 @@ def recall():
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 1000
+    num_samples = 100000
     MAX_CACHE_SIZE = 0.1
     COUNT_STEPS = 10
     dim = 384
@@ -146,10 +146,11 @@ def main():
         "LRUK",
         "DALFU",
         "ARC",
-        #"ClusterLRU",
-        #"ClusterLFU",
+        "ClusterLRU",
+        "ClusterLFU",
         "FIFO",
         "LIFO",
+        "RR",
         "DistanceLFU",
         "RAP",
         "SphereLFU",
@@ -211,25 +212,30 @@ def compare_crvb():
     processor.run()
 
 
-def compare_batch_size():
+def compare_vector_stores():
     MIN_BATCH_SIZE = 1
     MAX_BATCH_SIZE = 16
     COUNT_BATCH_SIZE = 10
-    count_nn = 1
-    num_samples = 250000
-    CACHE_RATIO = 0.1
+    MIN_NN_COUNT = 1
+    MAX_NN_COUNT = 16
+    COUNT_NN_COUNT = 10
+    MIN_CACHE_RATIO = 0.01
+    MAX_CACHE_RATIO = 0.1
+    COUNT_CACHE_RATIO = 10
+    num_samples = 1000
     SAME_EMBED_DISTANCE = 0.5
 
-    faiss_indices_names = {"HotSwap", "faiss", "milvus-standalone", "hnswlib"}  # more indices? HNSW?
+    faiss_indices_names = {"HotSwap", "faiss", "hnswlib"}#, "milvus-standalone",}  # more indices? HNSW?
     caches_names = {"LFU"}
 
     processor = Processor(NUM_PROCS)
 
+    # BATCH SIZE
     for dataset_name, _ in get_embeds_paths():
         for batch_size in np.linspace(MIN_BATCH_SIZE, MAX_BATCH_SIZE, COUNT_BATCH_SIZE):
             for cache_name in caches_names:
                 for index_name in faiss_indices_names:
-                    cache_size = int(num_samples * CACHE_RATIO)
+                    cache_size = int(num_samples * MAX_CACHE_RATIO)
                     processor.submit(
                         dataset_name,
                         cache_name,
@@ -238,16 +244,52 @@ def compare_batch_size():
                         num_samples,
                         cache_size,
                         int(batch_size),
-                        count_nn,
-                        "results_batch_size.json",
+                        MIN_NN_COUNT,
+                        "results_vector_stores.json",
+                    )
+        break  # only one dataset
+    # NN COUNT
+    for dataset_name, _ in get_embeds_paths():
+        for nn_count in np.linspace(MIN_NN_COUNT, MAX_NN_COUNT, COUNT_NN_COUNT):
+            for cache_name in caches_names:
+                for index_name in faiss_indices_names:
+                    cache_size = int(num_samples * MAX_CACHE_RATIO)
+                    processor.submit(
+                        dataset_name,
+                        cache_name,
+                        index_name,
+                        SAME_EMBED_DISTANCE,
+                        num_samples,
+                        cache_size,
+                        MIN_BATCH_SIZE,
+                        int(nn_count),
+                        "results_vector_stores.json",
+                    )
+        break  # only one dataset
+    # CACHE SIZE
+    for dataset_name, _ in get_embeds_paths():
+        for cache_ratio in np.linspace(MIN_CACHE_RATIO, MAX_CACHE_RATIO, COUNT_CACHE_RATIO):
+            for cache_name in caches_names:
+                for index_name in faiss_indices_names:
+                    cache_size = int(num_samples * cache_ratio)
+                    processor.submit(
+                        dataset_name,
+                        cache_name,
+                        index_name,
+                        SAME_EMBED_DISTANCE,
+                        num_samples,
+                        cache_size,
+                        MIN_BATCH_SIZE,
+                        MIN_NN_COUNT,
+                        "results_vector_stores.json",
                     )
         break  # only one dataset
     processor.run()
 
 
-def plot_compare_batch_size():
+def plot_compare_vector_stores():
     df = []
-    with open("results_batch_size.json", "r") as f:
+    with open("results_vector_stores.json", "r") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -255,48 +297,30 @@ def plot_compare_batch_size():
     df = pd.DataFrame(df)
     linestyles = ["-", "--", "-.", ":"]
     markers = ["o", "s", "^", "v", "D", "<", ">", "X", "+"]
-    for i, index_name in enumerate(set(df["Index"])):
-        df_index = df[(df["Index"] == index_name)]
-        index_runtime = df_index.groupby("Batch Size", as_index=False)[
-            "Throughput"
-        ].mean()
-        plt.plot(
-            index_runtime["Batch Size"],
-            index_runtime["Throughput"],
-            label=index_name,
-            marker=markers[i % len(linestyles)],
-            linestyle=linestyles[i % len(linestyles)],
-        )
-    plt.xlabel("Batch Size")
-    plt.ylabel("Throughput")
-    plt.yscale("log")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    figures_dir = "figures"
-    plt.savefig(os.path.join(figures_dir, "batch-size.png"))
-    plt.close()
     
-    for i, index_name in enumerate(set(df["Index"])):
-        df_index = df[(df["Index"] == index_name)]
-        index_runtime = df_index.groupby("Batch Size", as_index=False)[
-            "Hit Rate"
-        ].mean()
-        plt.plot(
-            index_runtime["Batch Size"],
-            index_runtime["Hit Rate"],
-            label=index_name,
-            marker=markers[i % len(linestyles)],
-            linestyle=linestyles[i % len(linestyles)],
-        )
-    plt.xlabel("Batch Size")
-    plt.ylabel("Hit Rate")
-    plt.yscale("log")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    figures_dir = "figures"
-    plt.savefig(os.path.join(figures_dir, "hit-rate.png"))
+    # Batch Size
+    for prop in ["Batch Size", "Count NN", "Cache Size", "Hit Rate"]:
+        for i, index_name in enumerate(set(df["Index"])):
+            df_index = df[(df["Index"] == index_name)]
+            index_runtime = df_index.groupby(prop, as_index=False)[
+                "Throughput"
+            ].mean()
+            plt.plot(
+                index_runtime[prop],
+                index_runtime["Throughput"],
+                label=index_name,
+                marker=markers[i % len(linestyles)],
+                linestyle=linestyles[i % len(linestyles)],
+            )
+        plt.xlabel(prop)
+        plt.ylabel("Throughput")
+        plt.yscale("log")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        figures_dir = "figures"
+        plt.savefig(os.path.join(figures_dir, f"{prop}.png"))
+        plt.close()
 
 
 def compare_index_runtime():
@@ -424,11 +448,11 @@ if __name__ == "__main__":
     mv = MilvusVectorStore()
     mv.drop_all()
     #recall()
-    main()
+    #main()
     #plot()
     
-    #compare_batch_size()
-    #plot_compare_batch_size()
+    compare_vector_stores()
+    plot_compare_vector_stores()
     
     #compare_index_runtime()
     #plot_compare_index_runtime()
