@@ -222,10 +222,10 @@ def compare_vector_stores():
     MIN_CACHE_RATIO = 0.01
     MAX_CACHE_RATIO = 0.1
     COUNT_CACHE_RATIO = 10
-    num_samples = 1000
+    num_samples = 10000
     SAME_EMBED_DISTANCE = 0.5
 
-    faiss_indices_names = {"HotSwap", "faiss", "hnswlib"}#, "milvus-standalone",}  # more indices? HNSW?
+    faiss_indices_names = {"milvus-standalone-flat", "milvus-standalone-hnsw", "milvus-standalone-ivf", "HotSwap", "faiss", "hnswlib"}  # more indices? HNSW?
     caches_names = {"LFU"}
 
     processor = Processor(NUM_PROCS)
@@ -445,8 +445,8 @@ def plot_compare_crvb():
     plt.savefig(os.path.join(figures_dir, f"ratio_lfu.png"))
 
 if __name__ == "__main__":
-    mv = MilvusVectorStore()
-    mv.drop_all()
+    #mv = MilvusVectorStore()
+    #mv.drop_all()
     #recall()
     #main()
     #plot()

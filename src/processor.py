@@ -73,10 +73,9 @@ def get_hnsw_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
     )
 
 def get_flat_index_milvus_lite(dim: int = 384):
-    id = f"./vector{uuid.uuid4()}.db".replace("-", "_")
     return MilvusVectorStore(
-        uri=id,
-        collection_name=id,
+        uri="C:\\Users\\User\\Desktop\\Spain\\test.db",
+        collection_name="col",
         dim=dim,
         metric_type="L2",
         index_type="FLAT",
@@ -94,6 +93,27 @@ def get_flat_index_milvus_standalone(uri: str = "http://localhost:19530", dim: i
         index_params={},  # FLAT has no extra params
     )
 
+def get_hnsw_index_milvus_standalone(uri: str = "http://localhost:19530", dim: int = 384):
+    id = f"vector{uuid.uuid4()}".replace("-", "_")
+    return MilvusVectorStore(
+        uri=uri,
+        collection_name=id,
+        dim=dim,
+        metric_type="L2",
+        index_type="HNSW",
+        index_params={},  # FLAT has no extra params
+    )
+
+def get_ivf_index_milvus_standalone(uri: str = "http://localhost:19530", dim: int = 384):
+    id = f"vector{uuid.uuid4()}".replace("-", "_")
+    return MilvusVectorStore(
+        uri=uri,
+        collection_name=id,
+        dim=dim,
+        metric_type="L2",
+        index_type="IVF_FLAT",
+        index_params={},  # FLAT has no extra params
+    )
 
 def get_hnsw_index_hnswlib(dim: int = 384):
     return HNSWVectorStore(
@@ -160,7 +180,9 @@ def _run_single_worker(args):
     }
     indices = {
         "milvus-lite": get_flat_index_milvus_lite,
-        "milvus-standalone": get_flat_index_milvus_standalone,
+        "milvus-standalone-flat": get_flat_index_milvus_standalone,
+        "milvus-standalone-ivf": get_ivf_index_milvus_standalone,
+        "milvus-standalone-hnsw": get_hnsw_index_milvus_standalone,
         "faiss": get_flat_index_faiss,
         "HotSwap": get_flat_index_naive,
         "hnswlib": get_hnsw_index_hnswlib

@@ -1,10 +1,9 @@
 from __future__ import annotations
 from typing import Iterable, List, Optional, Tuple, Union, Dict
 import numpy as np
-import uuid
 
 try:
-    from pymilvus import MilvusClient, DataType
+    from pymilvus import MilvusClient, DataType, Collection
 except Exception as e:
     raise RuntimeError("pymilvus is required: pip install pymilvus") from e
 
@@ -39,6 +38,8 @@ class MilvusVectorStore:
         self.vector_field_name = "vector"
         self.index_name = "index"
         self.client = MilvusClient(uri=uri)
+        self.count_tombs = 0
+        self.count_stored = 0
         
         if self.client.has_collection(self.collection_name):
             self.client.drop_collection(self.collection_name)
@@ -74,17 +75,22 @@ class MilvusVectorStore:
 
     # ----------------------- Public API (FAISS-like) -----------------------
     def add_with_ids(self, x: np.ndarray, ids: Union[np.ndarray, List[int]]) -> None:
+        self.check_rebuild()
         x = self._as_float32_2d(x)
         ids = self._as_int64_1d(ids)
         if len(ids) != len(x):
             raise ValueError(f"ids length {len(ids)} != vectors length {len(x)}")
         data = [{self.id_field_name: vid, self.vector_field_name: v} for (vid, v) in zip(ids, x)]
         self.client.insert(collection_name=self.collection_name, data=data)
+        self.count_stored += len(ids)
 
     def remove_ids(self, ids: Union[np.ndarray, List[int]]) -> int:
+        self.check_rebuild()
         ids = self._as_int64_1d(ids)
         res = self.client.delete(collection_name=self.collection_name, ids=ids.tolist())
         count_removed = int(res.get("delete_count"))
+        self.count_tombs += count_removed
+        self.count_stored -= count_removed
         return count_removed
 
     def search(
@@ -166,6 +172,18 @@ class MilvusVectorStore:
             print(f"Dropped collection: {coll}")
     
     # ----------------------------- Utilities -------------------------------
+    def check_rebuild(self) -> bool:
+        deleted_frac = self.count_tombs / (1+(self.count_stored + self.count_tombs))
+        if deleted_frac >= 0.25:
+            self.rebuild()
+            return True
+        return False
+    
+    def rebuild(self) -> None:
+        self.count_tombs = 0
+        #collection = Collection(self.collection_name)
+        #collection.compact(is_clustering=True)
+    
     @staticmethod
     def _as_float32_2d(x: Union[np.ndarray, Iterable[Iterable[float]]]) -> np.ndarray:
         arr = np.asarray(x, dtype=np.float32)
@@ -231,13 +249,13 @@ class MilvusVectorStore:
 # ------------------------------- Example -----------------------------------
 if __name__ == "__main__":
     dim = 64
-    store = VectorStore(
-        uri="http://localhost:19530",
-        collection_name=f"vector{uuid.uuid4()}".replace("-", "_"),
+    store = MilvusVectorStore(
+        uri="./test.db",
+        collection_name="col",
         dim=dim,
         metric_type="L2",
         index_type="FLAT",
-        index_params={"M": 16, "efConstruction": 100},
+        index_params={},  # FLAT has no extra params
     )
 
     # Add data
