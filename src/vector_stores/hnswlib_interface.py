@@ -215,11 +215,6 @@ class HNSWVectorStore:
             self._index.resize_index(int(new_cap))
 
     def rebuild(self, M: Optional[int] = None, ef_construction: Optional[int] = None) -> None:
-        """
-        Compact the index by re-building from current live vectors.
-        Requires `self._vectors` to contain all live vectors; if you've been
-        deleting vectors from the map to save memory, you can't rebuild.
-        """
         with self._lock:
             if not self._vectors:
                 # Nothing to rebuild from

@@ -3,7 +3,7 @@ from typing import Iterable, List, Optional, Tuple, Union, Dict
 import numpy as np
 
 try:
-    from pymilvus import MilvusClient, DataType, Collection
+    from pymilvus import MilvusClient, DataType, Collection, utility
 except Exception as e:
     raise RuntimeError("pymilvus is required: pip install pymilvus") from e
 
@@ -181,8 +181,7 @@ class MilvusVectorStore:
     
     def rebuild(self) -> None:
         self.count_tombs = 0
-        #collection = Collection(self.collection_name)
-        #collection.compact(is_clustering=True)
+        self.client.compact(self.collection_name)
     
     @staticmethod
     def _as_float32_2d(x: Union[np.ndarray, Iterable[Iterable[float]]]) -> np.ndarray:
