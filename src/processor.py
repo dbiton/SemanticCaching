@@ -73,7 +73,7 @@ def get_hnsw_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
     )
 
 def get_flat_index_milvus_lite(dim: int = 384):
-    id = f"vector{uuid.uuid4()}.db".replace("-", "_")
+    id = f"./vector{uuid.uuid4()}.db".replace("-", "_")
     return MilvusVectorStore(
         uri=id,
         collection_name=id,
