@@ -22,7 +22,7 @@ dataset_filenames = {
     "StackOverflow": "datasets/embeds_stackoverflow.pkl",
 }
 
-NUM_PROCS = 1
+NUM_PROCS = 6
 
 
 def plot():
@@ -33,33 +33,61 @@ def plot():
             if line:
                 df.append(json.loads(line))
     df = pd.DataFrame(df)
+
+    figures_dir = "figures"
+    os.makedirs(figures_dir, exist_ok=True)
+
+    linestyles = ["-", "--", "-.", ":"]
+    markers = ["o", "s", "^", "v", "D", "<", ">", "X", "+"]
+
+    ignore_policies = [
+        "RR",
+        "Surprisal"
+    ]
+    
+    # --- Generate normal plots ---
     for dataset_name in set(df['Dataset']):
         df_dataset = df[(df["Dataset"] == dataset_name)]
         for prop_name in df.columns:
             plt.figure()
             i = 0
-            linestyles = ["-", "--", "-.", ":"]
-            markers = ["o", "s", "^", "v", "D", "<", ">", "X", "+"]
+            handles, labels = [], []
             for cache_name in set(df_dataset["Cache Name"]):
+                if cache_name in ignore_policies:
+                    continue
                 df_cache = df_dataset[(df_dataset["Cache Name"] == cache_name)]
                 cache_size = list(df_cache['Cache Size'])
                 prop_values = list(df_cache[prop_name])
-                plt.plot(
+                h, = plt.plot(
                     cache_size,
                     prop_values,
                     label=cache_name,
-                    marker=markers[i % len(linestyles)],
+                    marker=markers[i % len(markers)],
                     linestyle=linestyles[i % len(linestyles)],
                 )
+                handles.append(h)
+                labels.append(cache_name)
                 i += 1
             plt.xlabel("Cache Size")
             plt.ylabel(prop_name)
-            plt.legend()
             plt.grid(True)
             plt.tight_layout()
-            plt.yscale("log")
-            figures_dir = "figures"
             plt.savefig(os.path.join(figures_dir, f"{prop_name}_{dataset_name}.png"))
+            plt.close()
+
+    # --- Create standalone legend figure ---
+    fig, ax = plt.subplots(figsize=(6, 0.5))  # adjust width/height
+    ax.axis("off")
+    # Reuse last handles/labels or regenerate from df if needed
+    fig.legend(
+        handles, labels,
+        loc="center",
+        ncol=min(len(labels), 8),  # wrap into multiple columns if many
+        frameon=False
+    )
+    fig.savefig(os.path.join(figures_dir, "legend.png"), bbox_inches="tight")
+    plt.close(fig)
+    
 
 
 def get_embeds_paths():
@@ -186,8 +214,8 @@ def compare_crvb():
     CAHCE_SIZE = 0.1
     MIN_DIS = 0.5
     MAX_DIS = 1.0
-    COUNT_DIS = 7
-
+    COUNT_DIS = 6
+    
     faiss_indices_names = {"HotSwap"}
     caches_names = {"NaiveRVB", "ClusterRVB", "LFU"}
 
@@ -222,10 +250,10 @@ def compare_vector_stores():
     MIN_CACHE_RATIO = 0.01
     MAX_CACHE_RATIO = 0.1
     COUNT_CACHE_RATIO = 10
-    num_samples = 10000
+    num_samples = 100000
     SAME_EMBED_DISTANCE = 0.5
 
-    faiss_indices_names = {"milvus-standalone-flat", "milvus-standalone-hnsw", "milvus-standalone-ivf", "HotSwap", "faiss", "hnswlib"}  # more indices? HNSW?
+    faiss_indices_names = {"milvus-standalone-flat", "milvus-standalone-hnsw", "milvus-standalone-ivf", "HotSwap", "faiss", "hnswlib"}
     caches_names = {"LFU"}
 
     processor = Processor(NUM_PROCS)
@@ -421,28 +449,49 @@ def plot_compare_crvb():
             hr_nrvb = nrvb_rows["Hit Rate"].iloc[0]
             hr_crvb = crvb_rows["Hit Rate"].iloc[0]
             hr_lfu = lfu_rows["Hit Rate"].iloc[0]
-            ratio_nrvb = (hr_nrvb / hr_crvb) if hr_crvb else float("nan")
-            ratio_lfu = (hr_lfu / hr_crvb) if hr_crvb else float("nan")
-            df_data.append({"Dataset": dataset_name, "D": eps, "ratio_nrvb": ratio_nrvb, "ratio_lfu": ratio_lfu})
+            ratio_nrvb = (hr_nrvb / hr_crvb ) if hr_crvb else float("nan")
+            ratio_lfu = (hr_crvb / hr_lfu) if hr_lfu else float("nan")
+            ratio_grvb = (hr_nrvb / hr_lfu) if hr_lfu else float("nan")
+            df_data.append({"Dataset": dataset_name, "D": eps, "ratio_nrvb": ratio_nrvb, "ratio_lfu": ratio_lfu, "ratio_grvb": ratio_grvb})
 
     figures_dir = "figures"
 
-    heat = pd.DataFrame(df_data).pivot(index="Dataset", columns="D", values="ratio_nrvb")
-    plt.figure()
-    ax = sns.heatmap(heat, annot=True, fmt=".2f", cmap="YlOrRd", cbar=True)
-    plt.title("NRVB / CRVB Hit Rate Ratio")
-    ax.set_xticklabels([f"{float(x.get_text()):.2f}" for x in ax.get_xticklabels()])
-    plt.tight_layout()
-    plt.savefig(os.path.join(figures_dir, f"ratio_nrvb.png"))
+    # Compute global min/max across all three ratios to ensure consistent color scale
+    all_values = pd.concat([
+        pd.DataFrame(df_data)["ratio_nrvb"],
+        pd.DataFrame(df_data)["ratio_lfu"],
+        pd.DataFrame(df_data)["ratio_grvb"]
+    ])
+    #vmin, vmax = all_values.min(), all_values.max()
 
-    
-    heat = pd.DataFrame(df_data).pivot(index="Dataset", columns="D", values="ratio_lfu")
-    plt.figure()
-    ax = sns.heatmap(heat, annot=True, fmt=".2f", cmap="YlOrRd", cbar=True)
-    plt.title("LFU / CRVB Hit Rate Ratio")
-    ax.set_xticklabels([f"{float(x.get_text()):.2f}" for x in ax.get_xticklabels()])
-    plt.tight_layout()
-    plt.savefig(os.path.join(figures_dir, f"ratio_lfu.png"))
+    cmap = sns.diverging_palette(10, 133, as_cmap=True)  # red-green
+    sns.set(font_scale=1.5)
+    for ratio, fname in [
+        ("ratio_nrvb", "ratio_nrvb.png"),
+        ("ratio_lfu", "ratio_lfu.png"),
+        ("ratio_grvb", "ratio_grvb.png"),
+    ]:
+        heat = pd.DataFrame(df_data).pivot(index="Dataset", columns="D", values=ratio)
+        plt.figure()
+        ax = sns.heatmap(
+            heat,
+            annot=True,
+            fmt=".2f",
+            cmap=cmap,
+            cbar=False,
+            center=1,        # red < 1, green > 1
+        )
+        ax.set_xticklabels([f"{float(x.get_text()):.2f}" for x in ax.get_xticklabels()])
+
+        # Remove the automatic "Dataset" label
+        ax.set_ylabel("")
+
+        # Rename "D" to "threshold distance"
+        ax.set_xlabel(r"$D_{\text{thresh}}$")
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(figures_dir, fname))
+        plt.close()
 
 if __name__ == "__main__":
     #mv = MilvusVectorStore()
@@ -451,10 +500,10 @@ if __name__ == "__main__":
     #main()
     #plot()
     
-    compare_vector_stores()
-    plot_compare_vector_stores()
+    #compare_vector_stores()
+    #plot_compare_vector_stores()
     
     #compare_index_runtime()
     #plot_compare_index_runtime()
-    # compare_crvb()
-    # plot_compare_crvb()
+    compare_crvb()
+    #plot_compare_crvb()

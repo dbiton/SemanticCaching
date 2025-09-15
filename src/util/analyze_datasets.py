@@ -1,10 +1,60 @@
+from collections import Counter
 import pickle
+import faiss
 from matplotlib import pyplot as plt
 import numpy as np
 from sklearn.manifold import TSNE
 from sklearn.metrics.pairwise import cosine_similarity, pairwise_distances
 from sklearn.decomposition import PCA
 from scipy.stats import entropy
+import sys
+
+def cluster_complete_linkage_faiss(embeds: np.ndarray, d: float) -> np.ndarray:
+    n, dim = embeds.shape
+    assert embeds.dtype == np.float32 and embeds.flags['C_CONTIGUOUS']
+    r2 = float(d * d)  # FAISS uses squared L2
+
+    index = faiss.IndexFlatL2(dim)
+    index.add(embeds)
+    lims, _, idx = index.range_search(embeds, r2)  # strict < r2 inside FAISS
+
+    # Build neighbor sets INCLUDING self to simplify intersections
+    neighbors = [set(idx[lims[i]:lims[i+1]]) | {i} for i in range(n)]
+    deg = np.fromiter((len(s) - 1 for s in neighbors), count=n, dtype=np.int32)
+
+    # Process low-degree vertices first (shrinks eligible sets faster)
+    order = np.argsort(deg)  # ascending degree
+
+    cluster_ids = -np.ones(n, dtype=np.int64)
+    assigned: set[int] = set()
+    cid = 0
+
+    for i in order:
+        if i in assigned:
+            continue
+
+        cluster = {i}
+        # Start with all neighbors of i (including i), remove already assigned
+        eligible = neighbors[i] - assigned
+
+        # Repeatedly add a vertex that is compatible with everything chosen so far.
+        # Compatibility is guaranteed by intersecting eligibility with its neighbors.
+        while True:
+            # don't reconsider current cluster members
+            eligible -= cluster
+            if not eligible:
+                break
+            # Heuristic: pick the smallest-degree vertex in the current eligible set
+            c = min(eligible, key=deg.__getitem__)
+            cluster.add(c)
+            eligible &= neighbors[c]   # tighten to vertices adjacent to all in cluster
+
+        for u in cluster:
+            cluster_ids[u] = cid
+        assigned.update(cluster)
+        cid += 1
+
+    return cluster_ids
 
 def calculate_pairwise_statistics(embeddings):
     """
@@ -95,12 +145,15 @@ for dataset_name, file_path in datasets_paths.items():
         data = pickle.load(f)
 
     # Use a subset of embeddings if needed
-    embeds = data['embeds'][:10000]
-    texts = data['text'][:10000]
-    print(dataset_name)
+    embeds = data['normalized_embeds'][:75000]
     #plot_pca(embeds, f"{dataset_name}_pca.png")
     #plot_tsne(embeds, f"{dataset_name}_tsne.png")
-
+    clusters_ids = cluster_complete_linkage_faiss(embeds, 0.5)
+    clusters_sizes_dict = Counter(clusters_ids)
+    clusters_sizes = list(clusters_sizes_dict.values())
+    mean_cluster_size = np.mean(clusters_sizes)
+    std_cluster_size = np.std(clusters_sizes)
+    
     # Calculate the pairwise statistics
     cs_mean, cs_std, ed_mean, ed_std = calculate_pairwise_statistics(embeds)
     
@@ -113,7 +166,9 @@ for dataset_name, file_path in datasets_paths.items():
         "cosine_sim_std": cs_std,
         "euclidean_dist_mean": ed_mean,
         "euclidean_dist_std": ed_std,
-        "pca_entropy": pca_ent
+        "pca_entropy": pca_ent,
+        "mean_cluster_size": mean_cluster_size,
+        "std_cluster_size": std_cluster_size
     }
 
 # Define the order of metrics and the corresponding row labels
@@ -122,7 +177,9 @@ metrics_order = [
     ("cosine_sim_std", "Std Cosine Sim."),
     ("euclidean_dist_mean", "Mean Eucl. Dist."),
     ("euclidean_dist_std", "Std Eucl. Dist."),
-    ("pca_entropy", "PCA Entropy")
+    ("pca_entropy", "PCA Entropy"),
+    ("mean_cluster_size", "Mean Cluster Size"),
+    ("std_cluster_size", "Std Cluster Size"),
 ]
 
 # Get the list of datasets for columns

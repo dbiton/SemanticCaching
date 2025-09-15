@@ -44,7 +44,7 @@ class HNSWVectorStore:
         dim: int = 384,
         space: str = "l2",
         M: int = 16,
-        ef_construction: int = 200,
+        ef_construction: int = 100,
         ef: int = 64,
         max_elements: int = 100_000,
         allow_replace_delete: bool = False,

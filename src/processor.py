@@ -320,6 +320,7 @@ class Processor:
         return embeds, embeds_texts
 
     def run(self) -> None:
+        random.shuffle(self.submissions) # shuffle for a better estimation of runtime
         self.setup_progress_queue()
         Pool = ProcessPoolExecutor if self.num_procs > 1 else ThreadPoolExecutor
         random.shuffle(self.submissions)
