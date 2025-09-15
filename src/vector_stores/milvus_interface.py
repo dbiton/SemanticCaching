@@ -226,7 +226,7 @@ class MilvusVectorStore:
             return {}
         if t in {"IVF_FLAT", "IVF_SQ8", "IVF_PQ"}:
             # Conservative defaults; tune per dataset
-            base = {"nlist": 128}
+            base = {"nlist": 100}
             if t == "IVF_PQ":
                 base.update({"m": 16, "nbits": 8})  # PQ codebooks/precision
             return base
@@ -234,7 +234,7 @@ class MilvusVectorStore:
             return {"M": 16, "efConstruction": 100}
         if t == "SCANN":
             # ScaNN params vary by build; provide a sane placeholder
-            return {"nlist": 128}
+            return {"nlist": 100}
         if t == "AUTOINDEX":
             return {}
         # Fallback for GPU or newer types (e.g., GPU_IVF_FLAT, GPU_CAGRA)

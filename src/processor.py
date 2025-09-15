@@ -70,7 +70,6 @@ def get_hnsw_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
         dim=dim,
         metric_type="L2",
         index_type="HNSW",
-        index_params={"M": 32, "efConstruction": 200},
     )
 
 def get_flat_index_milvus_lite(dim: int = 384):
@@ -81,7 +80,6 @@ def get_flat_index_milvus_lite(dim: int = 384):
         dim=dim,
         metric_type="L2",
         index_type="FLAT",
-        index_params={},  # FLAT has no extra params
     )
 
 def get_flat_index_milvus_standalone(uri: str = "http://localhost:19530", dim: int = 384):
@@ -92,7 +90,6 @@ def get_flat_index_milvus_standalone(uri: str = "http://localhost:19530", dim: i
         dim=dim,
         metric_type="L2",
         index_type="FLAT",
-        index_params={},  # FLAT has no extra params
     )
 
 def get_hnsw_index_milvus_standalone(uri: str = "http://localhost:19530", dim: int = 384):
@@ -103,7 +100,6 @@ def get_hnsw_index_milvus_standalone(uri: str = "http://localhost:19530", dim: i
         dim=dim,
         metric_type="L2",
         index_type="HNSW",
-        index_params={},  # FLAT has no extra params
     )
 
 def get_ivf_index_milvus_standalone(uri: str = "http://localhost:19530", dim: int = 384):
@@ -114,14 +110,11 @@ def get_ivf_index_milvus_standalone(uri: str = "http://localhost:19530", dim: in
         dim=dim,
         metric_type="L2",
         index_type="IVF_FLAT",
-        index_params={},  # FLAT has no extra params
     )
 
 def get_hnsw_index_hnswlib(dim: int = 384):
     return HNSWVectorStore(
         dim=dim,
-        M=16,
-        ef_construction=200,
         allow_replace_delete=True
     )
 
@@ -131,7 +124,7 @@ def get_flat_index_naive(dim: int = 384):
 
 
 def get_ivf_index_milvus(
-    uri: str = "http://localhost:19530", dim: int = 384, nlist: int = 10
+    uri: str = "http://localhost:19530", dim: int = 384
 ):
     id = f"vector{uuid.uuid4()}".replace("-", "_")
     return MilvusVectorStore(
@@ -140,7 +133,6 @@ def get_ivf_index_milvus(
         dim=dim,
         metric_type="L2",
         index_type="IVF_FLAT",
-        index_params={"nlist": int(nlist)},
     )
 
 
