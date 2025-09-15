@@ -88,7 +88,12 @@ class MilvusVectorStore:
         self.check_rebuild()
         ids = self._as_int64_1d(ids)
         res = self.client.delete(collection_name=self.collection_name, ids=ids.tolist())
-        count_removed = int(res.get("delete_count"))
+        if isinstance(res, dict): 
+            count_removed = int(res.get("delete_count"))
+        elif isinstance(res, list):
+            count_removed = len(res)
+        else:
+            raise Exception("remove_ids")
         self.count_tombs += count_removed
         self.count_stored -= count_removed
         return count_removed
@@ -181,7 +186,10 @@ class MilvusVectorStore:
     
     def rebuild(self) -> None:
         self.count_tombs = 0
-        self.client.compact(self.collection_name)
+        try:
+            self.client.compact(self.collection_name)
+        except Exception as e:
+            print(f"WARN: Compact is not implemented due to {e}")
     
     @staticmethod
     def _as_float32_2d(x: Union[np.ndarray, Iterable[Iterable[float]]]) -> np.ndarray:

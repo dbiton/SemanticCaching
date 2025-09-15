@@ -2,6 +2,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 import json
 import os
 import pickle
+import random
 import threading
 import time
 import uuid
@@ -73,8 +74,9 @@ def get_hnsw_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
     )
 
 def get_flat_index_milvus_lite(dim: int = 384):
+    db_path = str(uuid.uuid4()).replace("-","").replace("_", "")+".db"
     return MilvusVectorStore(
-        uri="C:\\Users\\User\\Desktop\\Spain\\test.db",
+        uri=db_path,
         collection_name="col",
         dim=dim,
         metric_type="L2",
@@ -320,6 +322,7 @@ class Processor:
     def run(self) -> None:
         self.setup_progress_queue()
         Pool = ProcessPoolExecutor if self.num_procs > 1 else ThreadPoolExecutor
+        random.shuffle(self.submissions)
         with Pool(self.num_procs) as executor:
             futures = [
                 executor.submit(_run_single_worker, arg + [self.progress_queue])
