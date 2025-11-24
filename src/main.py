@@ -22,7 +22,7 @@ dataset_filenames = {
     "StackOverflow": "datasets/embeds_stackoverflow.pkl",
 }
 
-NUM_PROCS = 6
+NUM_PROCS = 8
 
 
 def plot():
@@ -42,7 +42,9 @@ def plot():
 
     ignore_policies = [
         "RR",
-        "Surprisal"
+        "Surprisal",
+        "LIFO",
+        "FIFO"
     ]
     
     # --- Generate normal plots ---
@@ -55,9 +57,9 @@ def plot():
             for cache_name in set(df_dataset["Cache Name"]):
                 if cache_name in ignore_policies:
                     continue
-                df_cache = df_dataset[(df_dataset["Cache Name"] == cache_name)]
-                cache_size = list(df_cache['Cache Size'])
-                prop_values = list(df_cache[prop_name])
+                df_cache = df_dataset[df_dataset["Cache Name"] == cache_name].sort_values("Cache Size")
+                cache_size = df_cache["Cache Size"].to_list()
+                prop_values = df_cache[prop_name].to_list()
                 h, = plt.plot(
                     cache_size,
                     prop_values,
@@ -72,6 +74,7 @@ def plot():
             plt.ylabel(prop_name)
             plt.grid(True)
             plt.tight_layout()
+            plt.legend()
             plt.savefig(os.path.join(figures_dir, f"{prop_name}_{dataset_name}.png"))
             plt.close()
 
@@ -82,7 +85,7 @@ def plot():
     fig.legend(
         handles, labels,
         loc="center",
-        ncol=min(len(labels), 8),  # wrap into multiple columns if many
+        ncol=min(len(labels), 7),  # wrap into multiple columns if many
         frameon=False
     )
     fig.savefig(os.path.join(figures_dir, "legend.png"), bbox_inches="tight")
@@ -156,7 +159,7 @@ def recall():
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 100000
+    num_samples = 32000
     MAX_CACHE_SIZE = 0.1
     COUNT_STEPS = 10
     dim = 384
@@ -164,24 +167,25 @@ def main():
 
     faiss_indices_names = {"HotSwap"}
     caches_names = {
-        "NaiveRVB",
-        "ClusterRVB",
-        "SurprisalLFU",
-        "Surprisal",
+        #"NaiveRVB",
+        #"ClusterRVB",
+        #"SurprisalLFU",
+        #"Surprisal",
+        "SampleCache",
         "LFU",
-        "MissLFU",
+        #"MissLFU",
         "LRU",
-        "LRUK",
-        "DALFU",
-        "ARC",
-        "ClusterLRU",
-        "ClusterLFU",
-        "FIFO",
-        "LIFO",
-        "RR",
-        "DistanceLFU",
-        "RAP",
-        "SphereLFU",
+        #"LRUK",
+        #"DALFU",
+        #"ARC",
+        #"ClusterLRU",
+        #"ClusterLFU",
+        #"FIFO",
+        #"LIFO",
+        #"RR",
+        #"DistanceLFU",
+        #"RAP",
+        #"SphereLFU",
     }
 
     processor = Processor(NUM_PROCS)
@@ -253,7 +257,7 @@ def compare_vector_stores():
     num_samples = 100000
     SAME_EMBED_DISTANCE = 0.5
 
-    faiss_indices_names = {"milvus-standalone-flat", "milvus-standalone-hnsw", "milvus-standalone-ivf", "HotSwap", "faiss", "hnswlib"}
+    faiss_indices_names = {"milvus-standalone-hnsw", "milvus-standalone-ivf", "hnswlib", "HotSwap", "faiss", "milvus-standalone-flat"}
     caches_names = {"LFU"}
 
     processor = Processor(NUM_PROCS)
@@ -264,12 +268,13 @@ def compare_vector_stores():
             for cache_name in caches_names:
                 for index_name in faiss_indices_names:
                     cache_size = int(num_samples * MAX_CACHE_RATIO)
+                    curr_num_samples = cache_size * 5
                     processor.submit(
                         dataset_name,
                         cache_name,
                         index_name,
                         SAME_EMBED_DISTANCE,
-                        num_samples,
+                        curr_num_samples,
                         cache_size,
                         int(batch_size),
                         MIN_NN_COUNT,
@@ -282,12 +287,13 @@ def compare_vector_stores():
             for cache_name in caches_names:
                 for index_name in faiss_indices_names:
                     cache_size = int(num_samples * MAX_CACHE_RATIO)
+                    curr_num_samples = cache_size * 5
                     processor.submit(
                         dataset_name,
                         cache_name,
                         index_name,
                         SAME_EMBED_DISTANCE,
-                        num_samples,
+                        curr_num_samples,
                         cache_size,
                         MIN_BATCH_SIZE,
                         int(nn_count),
@@ -300,12 +306,13 @@ def compare_vector_stores():
             for cache_name in caches_names:
                 for index_name in faiss_indices_names:
                     cache_size = int(num_samples * cache_ratio)
+                    curr_num_samples = cache_size * 5
                     processor.submit(
                         dataset_name,
                         cache_name,
                         index_name,
                         SAME_EMBED_DISTANCE,
-                        num_samples,
+                        curr_num_samples,
                         cache_size,
                         MIN_BATCH_SIZE,
                         MIN_NN_COUNT,
@@ -328,7 +335,7 @@ def plot_compare_vector_stores():
     
     # Batch Size
     for prop in ["Batch Size", "Count NN", "Cache Size", "Hit Rate"]:
-        for i, index_name in enumerate(set(df["Index"])):
+        for i, index_name in enumerate(["faiss", "HotSwap", "hnswlib", "milvus-standalone-flat", "milvus-standalone-hnsw", "milvus-standalone-ivf"]):
             df_index = df[(df["Index"] == index_name)]
             index_runtime = df_index.groupby(prop, as_index=False)[
                 "Throughput"
@@ -497,13 +504,13 @@ if __name__ == "__main__":
     #mv = MilvusVectorStore()
     #mv.drop_all()
     #recall()
-    #main()
-    #plot()
+    main()
+    plot()
     
     #compare_vector_stores()
     #plot_compare_vector_stores()
     
     #compare_index_runtime()
     #plot_compare_index_runtime()
-    compare_crvb()
+    #compare_crvb()
     #plot_compare_crvb()
