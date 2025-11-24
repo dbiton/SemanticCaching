@@ -24,7 +24,8 @@ from caches.cache import (
     RAP,
     RR,
     FIFO,
-    LIFO
+    LIFO,
+    SamplingMetaCache
 )
 from caches.arc import ARC
 from caches.cluster_lru import ClusterLRU
@@ -158,6 +159,7 @@ def _run_single_worker(args):
         "ClusterRVB": (ClusterOPT, same_embed_distance, total_embeds),
         "SurprisalLFU": (SurprisalLFU, same_embed_distance),
         "Surprisal": (Surprisal, same_embed_distance),
+        "SampleCache": (SamplingMetaCache, same_embed_distance, [LRU, LFU]),
         "LIFO": (LIFO, same_embed_distance),
         "FIFO": (FIFO, same_embed_distance),
         "RR": (RR, same_embed_distance),
