@@ -5,8 +5,7 @@ import faiss
 from sklearn.decomposition import PCA
 import tqdm
 
-from OPT import RLB_Reg, RelaxedLearnedOPT, RelaxedOPT
-from src.util.reduce_dim import reduce_dim
+from util.reduce_dim import reduce_dim
 from random import sample
 from sklearn.metrics import (
     confusion_matrix, accuracy_score, precision_score,
@@ -14,7 +13,7 @@ from sklearn.metrics import (
     cohen_kappa_score, balanced_accuracy_score,
     classification_report
 )
-from cache import LFU, LRU
+from caches.cache import SphereQueryLFU, LFU
 import random
 
 def binary_classification_stats(y_true, y_pred):
@@ -74,10 +73,10 @@ def load_embeds_covers():
         return pickle.load(f)
 
 dataset_filenames = {
-    "OAsst": "datasets_text/embeds_oasst.pkl",
+    #"OAsst": "datasets_text/embeds_oasst.pkl",
     #"persona": "datasets_text/embeds_persona.pkl",
     #"quora": "datasets_text/embeds_quora.pkl",
-    #"WildChat": "datasets_text/embeds_chat.pkl",
+    "WildChat": "datasets/embeds_wildchat.pkl",
     #"Bing": "datasets_text/embeds_bing.pkl",
     #"StackOverflow": "datasets_text/embeds_so.pkl",
     #"ComQA": "datasets_text/embeds_ComQA.pkl",
@@ -197,12 +196,12 @@ def show(y_true, y_pred):
 def test_policy():
     DIM = 384
     DELTAS_COUNT = 4
-    STREAM_SIZE = 3000
-    CACHE_SIZE = 1000
+    STREAM_SIZE = 10000
+    CACHE_SIZE = 10
     BATCH_SIZE = 1
     COUNT_NN = 1
-    SAME_EMBED_DISTANCE = 1.
-    BELADY_BOUNDARY_COE = 1.0
+    SAME_EMBED_DISTANCE = 1
+    BELADY_BOUNDARY_COE = 2.0
     for dataset_name, data in load_embeds():
         indices = sample(range(len(data['embeds'])), min(STREAM_SIZE, len(data['embeds'])))
         preps = [data['text'][i] for i in indices]
@@ -210,9 +209,8 @@ def test_policy():
         embeds = list(zip(embeds_actual, preps))
         embeds_covers = create_embeds_covers(embeds_actual, SAME_EMBED_DISTANCE)
         for cache in [
-            LRU(SAME_EMBED_DISTANCE), 
-            #RelaxedOPT(SAME_EMBED_DISTANCE, embeds_actual, BELADY_BOUNDARY_COE)]:
-            RelaxedLearnedOPT(SAME_EMBED_DISTANCE, DELTAS_COUNT, 1, BELADY_BOUNDARY_COE, DIM)]:
+            SphereQueryLFU(SAME_EMBED_DISTANCE),
+            LFU(SAME_EMBED_DISTANCE)]:
             index = faiss.IndexIDMap2(faiss.IndexFlatL2(DIM))
             cache.initialize(CACHE_SIZE, index)
             count_evicts = 0

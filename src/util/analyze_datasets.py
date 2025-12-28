@@ -9,52 +9,8 @@ from sklearn.decomposition import PCA
 from scipy.stats import entropy
 import sys
 
-def cluster_complete_linkage_faiss(embeds: np.ndarray, d: float) -> np.ndarray:
-    n, dim = embeds.shape
-    assert embeds.dtype == np.float32 and embeds.flags['C_CONTIGUOUS']
-    r2 = float(d * d)  # FAISS uses squared L2
-
-    index = faiss.IndexFlatL2(dim)
-    index.add(embeds)
-    lims, _, idx = index.range_search(embeds, r2)  # strict < r2 inside FAISS
-
-    # Build neighbor sets INCLUDING self to simplify intersections
-    neighbors = [set(idx[lims[i]:lims[i+1]]) | {i} for i in range(n)]
-    deg = np.fromiter((len(s) - 1 for s in neighbors), count=n, dtype=np.int32)
-
-    # Process low-degree vertices first (shrinks eligible sets faster)
-    order = np.argsort(deg)  # ascending degree
-
-    cluster_ids = -np.ones(n, dtype=np.int64)
-    assigned: set[int] = set()
-    cid = 0
-
-    for i in order:
-        if i in assigned:
-            continue
-
-        cluster = {i}
-        # Start with all neighbors of i (including i), remove already assigned
-        eligible = neighbors[i] - assigned
-
-        # Repeatedly add a vertex that is compatible with everything chosen so far.
-        # Compatibility is guaranteed by intersecting eligibility with its neighbors.
-        while True:
-            # don't reconsider current cluster members
-            eligible -= cluster
-            if not eligible:
-                break
-            # Heuristic: pick the smallest-degree vertex in the current eligible set
-            c = min(eligible, key=deg.__getitem__)
-            cluster.add(c)
-            eligible &= neighbors[c]   # tighten to vertices adjacent to all in cluster
-
-        for u in cluster:
-            cluster_ids[u] = cid
-        assigned.update(cluster)
-        cid += 1
-
-    return cluster_ids
+from reduce_dim import cluster_complete_linkage_faiss
+from density_estimator import DensityEstimator
 
 def calculate_pairwise_statistics(embeddings):
     """
@@ -128,89 +84,366 @@ def calculate_entropy_of_principal_components(embeddings):
     pca_entropy = entropy(explained_variance_ratio, base=2)  # Base 2 for bit entropy
     return pca_entropy
 
-datasets_paths = {
-    "MsMarco": "C:/Projects/DimCache/datasets/embeds_msmarco.pkl",
-    "WildChat": "C:/Projects/DimCache/datasets/embeds_wildchat.pkl",
-    "ELI5": "C:/Projects/DimCache/datasets/embeds_eli5.pkl",
-    "NaturalQuestions": "C:/Projects/DimCache/datasets/embeds_nq.pkl",
-    "StackOverflow": "C:/Projects/DimCache/datasets/embeds_stackoverflow.pkl",
-    "Quora": "C:/Projects/DimCache/datasets/embeds_quora_qp.pkl",
-}
+def point_density(embeds, semantic_equiv_distance=0.75):
+    """
+    Efficient point-density using FAISS range search.
+    Counts how many points lie within radius `semantic_equiv_distance`
+    for each embedding.
+    
+    embeds: np.ndarray (n, d), float32 recommended
+    returns: np.ndarray of shape (n,)
+    """
+    embeds = np.asarray(embeds).astype('float32')
+    n, d = embeds.shape
 
-results = {}
+    index = faiss.IndexFlatL2(d)  # exact L2 search
+    index.add(embeds)
 
-# Calculate metrics and store them
-for dataset_name, file_path in datasets_paths.items():
-    with open(file_path, "rb") as f:
-        data = pickle.load(f)
+    # FAISS uses squared radius for L2
+    radius_sq = semantic_equiv_distance ** 2
 
-    # Use a subset of embeddings if needed
-    embeds = data['normalized_embeds'][:75000]
-    #plot_pca(embeds, f"{dataset_name}_pca.png")
-    #plot_tsne(embeds, f"{dataset_name}_tsne.png")
-    clusters_ids = cluster_complete_linkage_faiss(embeds, 0.5)
-    clusters_sizes_dict = Counter(clusters_ids)
+    # Range search: returns (lims, D, I)
+    lims, D, I = index.range_search(embeds, radius_sq)
+
+    # Convert FAISS prefix-sum style output to counts
+    counts = np.empty(n, dtype=int)
+    for i in range(n):
+        counts[i] = lims[i+1] - lims[i]
+
+    return counts
+
+def plot_point_density_vs_rank(embeds, distribution_name):
+    """
+    Plot point density (counts) with rank on x-axis and point density on y-axis.
+    Creates multiple lines for semantic equivalence distances from 0.5 to 1.5 in 0.1 increments.
+    """
+    # Create figure with log-log scale
+    plt.figure(figsize=(12, 7))
+    
+    # Semantic equivalence distances to test
+    distances = np.arange(0.5, 1.6, 0.1)  # 0.5, 0.6, ..., 1.5
+    
+    for distance in distances:
+        # Calculate point density for each embedding
+        counts = point_density(embeds, semantic_equiv_distance=distance)
+        
+        # Sort counts in descending order to create rank distribution
+        sorted_counts = sorted(counts, reverse=True)
+        ranks = np.arange(1, len(sorted_counts) + 1)
+        
+        # Plot the line
+        plt.plot(ranks, sorted_counts, alpha=0.7, linewidth=2, 
+                label=f'Distance = {distance:.1f}')
+    
+    plt.xlabel('Rank', fontsize=12)
+    plt.ylabel('Point Density (Count)', fontsize=12)
+    plt.xscale('log')
+    plt.yscale('log')
+    plt.title(f'Point Density vs Rank - {distribution_name}', fontsize=14)
+    plt.legend(fontsize=10, loc='best')
+    plt.grid(True, alpha=0.3, which='both')
+    plt.tight_layout()
+    plt.savefig(f'{distribution_name}_point_density_distances.png', dpi=100)
+    plt.close()
+
+
+def cluster_sizes(embeds, distribution_name):
+    clusters = cluster_complete_linkage_faiss(embeds, 1.2)
+    clusters_sizes_dict = Counter(clusters)
     clusters_sizes = list(clusters_sizes_dict.values())
-    mean_cluster_size = np.mean(clusters_sizes)
-    std_cluster_size = np.std(clusters_sizes)
+    print(f"Number of clusters: {len(clusters_sizes_dict)}")
+    print(f"Mean cluster size: {np.mean(clusters_sizes)}")
+    print(f"Std cluster size: {np.std(clusters_sizes)}")
     
-    # Calculate the pairwise statistics
-    cs_mean, cs_std, ed_mean, ed_std = calculate_pairwise_statistics(embeds)
+    # Plot cluster size distribution
+    sorted_sizes = sorted(clusters_sizes, reverse=True)
+    ranks = np.arange(1, len(sorted_sizes) + 1)
     
-    # Calculate entropy of principal components
-    pca_ent = calculate_entropy_of_principal_components(embeds)
+    plt.figure(figsize=(10, 6))
+    plt.scatter(ranks, sorted_sizes, alpha=0.6)
+    plt.xlabel('Rank')
+    plt.ylabel('Cluster Size')
+    plt.yscale('log')
+    plt.xscale('log')
+    plt.title(f'Cluster Size Distribution - {distribution_name}')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    # plt.show()
+    # This suggests a power law distribution, P(x) ~ x^-alpha
+    # We can fit a linear model to log(rank) vs log(size)
+    log_ranks = np.log(ranks)
+    log_sizes = np.log(sorted_sizes)
+
+    # Filter out any -inf values that might arise from log(0) if sorted_sizes contains 0
+    valid_indices = np.isfinite(log_ranks) & np.isfinite(log_sizes)
+    log_ranks = log_ranks[valid_indices]
+    log_sizes = log_sizes[valid_indices]
+
+    if len(log_ranks) > 1: # Need at least two points to fit a line
+        # Perform linear regression
+        # Using polyfit for simplicity, it returns coefficients [slope, intercept]
+        coefficients = np.polyfit(log_ranks, log_sizes, 1)
+        slope = coefficients[0]
+        intercept = coefficients[1]
+
+        # Plot the fitted line
+        plt.plot(ranks, np.exp(intercept + slope * log_ranks), color='red', linestyle='--', label=f'Fit: y = {np.exp(intercept):.2f}x^{slope:.2f}')
+        plt.legend()
+    plt.savefig(f'{distribution_name}_loglog.jpg', dpi=100)
+    plt.close()
+
+
+def hypersphere_coverage(embeds, num_representatives, threshold):
+    """
+    Greedily select N hyperspheres that maximize coverage.
+    Similar to max coverage problem - recalculates densest region after removing
+    the first most dense area, and repeats num_representatives times.
     
-    # Store results in a dictionary
-    results[dataset_name] = {
-        "cosine_sim_mean": cs_mean,
-        "cosine_sim_std": cs_std,
-        "euclidean_dist_mean": ed_mean,
-        "euclidean_dist_std": ed_std,
-        "pca_entropy": pca_ent,
-        "mean_cluster_size": mean_cluster_size,
-        "std_cluster_size": std_cluster_size
+    Args:
+        embeds: np.ndarray of shape (n, d) - embeddings
+        num_representatives: int - number of greedy selections to make
+        threshold: float - radius of hyperspheres (semantic equivalence distance)
+    
+    Returns:
+        covered_count: int - number of unique vectors covered by the hyperspheres
+        coverage_ratio: float - ratio of covered vectors to total vectors
+        representative_densities: np.ndarray - densities of the representative vectors
+        representative_indices: np.ndarray - indices of the representative vectors
+    """
+    embeds = np.asarray(embeds).astype('float32')
+    n, d = embeds.shape
+    
+    # Create FAISS index for range search
+    index = faiss.IndexFlatL2(d)
+    index.add(embeds)
+    
+    radius_sq = threshold ** 2
+    uncovered_mask = np.ones(n, dtype=bool)  # Track which vectors are still uncovered
+    covered_indices = set()
+    representative_indices = []
+    representative_densities = []
+    
+    for _ in range(num_representatives):
+        # Calculate density only for uncovered vectors
+        densities = point_density(embeds[uncovered_mask], semantic_equiv_distance=threshold)
+        
+        if len(densities) == 0:
+            break  # No more uncovered vectors
+        
+        # Find the densest uncovered vector
+        densest_uncovered_idx = np.argmax(densities)
+        original_idx = np.where(uncovered_mask)[0][densest_uncovered_idx]
+        
+        representative_indices.append(original_idx)
+        representative_densities.append(densities[densest_uncovered_idx])
+        
+        # Find all vectors covered by this hypersphere
+        lims, D, I = index.range_search(embeds[original_idx:original_idx+1], radius_sq)
+        newly_covered = set()
+        for i in range(lims[0], lims[1]):
+            newly_covered.add(I[i])
+            covered_indices.add(I[i])
+        
+        # Mark these vectors as covered
+        uncovered_mask[list(newly_covered)] = False
+    
+    covered_count = len(covered_indices)
+    coverage_ratio = covered_count / n
+    representative_densities = np.array(representative_densities)
+    representative_indices = np.array(representative_indices)
+    
+    return covered_count, coverage_ratio, representative_densities, representative_indices
+
+
+def compare_density_estimator(embeds, threshold=0.75):
+    """
+    Create, train, and compare a DensityEstimator to actual point density.
+    
+    Args:
+        embeds: np.ndarray of shape (n, d) - embeddings to train and evaluate on
+        cell_size: float - cell size parameter for DensityEstimator
+        threshold: float - semantic equivalence distance for calculating actual density
+    
+    Returns:
+        dict with metrics:
+            - mae: mean absolute error
+            - rmse: root mean squared error
+            - pearson_correlation: Pearson correlation coefficient
+            - r_squared: coefficient of determination
+            - spearman_correlation: Spearman rank correlation
+            - percent_correct_order: percentage of pairwise density orderings that match
+            - actual_densities: ground truth densities
+            - estimated_densities: estimator predictions
+            - density_estimator: the trained DensityEstimator instance
+    """
+    from scipy.stats import spearmanr
+    
+    # Create and train the density estimator
+    embeds_float32 = np.asarray(embeds, dtype=np.float32)
+    dim = embeds_float32.shape[1]
+    
+    density_estimator = DensityEstimator(
+        dim=384,
+        width=100003, 
+        reps=30,     
+        hashes_per_rep=2, 
+    )
+    density_estimator.auto_tune(embeds_float32)
+    density_estimator.update(embeds_float32)
+    
+    # Get density estimates from the trained estimator
+    estimated_densities = density_estimator.query(embeds_float32)
+    
+    # Calculate actual point densities
+    actual_densities = point_density(embeds, semantic_equiv_distance=threshold)
+    
+    # Ensure both arrays are the same shape and type
+    estimated_densities = np.asarray(estimated_densities, dtype=np.float64)
+    actual_densities = np.asarray(actual_densities, dtype=np.float64)
+    
+    if len(estimated_densities) != len(actual_densities):
+        raise ValueError(f"Length mismatch: estimated ({len(estimated_densities)}) vs actual ({len(actual_densities)})")
+    
+    # Calculate metrics
+    mae = np.mean(np.abs(estimated_densities - actual_densities))
+    rmse = np.sqrt(np.mean((estimated_densities - actual_densities) ** 2))
+    
+    # Pearson correlation
+    pearson_corr = np.corrcoef(estimated_densities, actual_densities)[0, 1]
+    
+    # R-squared (coefficient of determination)
+    ss_res = np.sum((actual_densities - estimated_densities) ** 2)
+    ss_tot = np.sum((actual_densities - np.mean(actual_densities)) ** 2)
+    r_squared = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+    
+    # Spearman rank correlation
+    spearman_corr, _ = spearmanr(estimated_densities, actual_densities)
+    
+    # Percentage of correct pairwise orderings
+    # Sample pairs to make this tractable for large datasets
+    n = len(actual_densities)
+    sample_size = min(10000, n * (n - 1) // 2)  # Limit to 10k pairs
+    
+    correct_orderings = 0
+    for _ in range(sample_size):
+        i, j = np.random.choice(n, 2, replace=False)
+        actual_order = actual_densities[i] > actual_densities[j]
+        estimated_order = estimated_densities[i] > estimated_densities[j]
+        if actual_order == estimated_order:
+            correct_orderings += 1
+    
+    percent_correct_order = (correct_orderings / sample_size) * 100
+    
+    results = {
+        'mae': mae,
+        'rmse': rmse,
+        'pearson_correlation': pearson_corr,
+        'r_squared': r_squared,
+        'spearman_correlation': spearman_corr,
+        'percent_correct_order': percent_correct_order,
+        'actual_densities': actual_densities,
+        'estimated_densities': estimated_densities,
+        'density_estimator': density_estimator
+    }
+    
+    print(results)
+    
+    return results
+
+
+def analyze_embeds(embeds, distribution_name):
+    plot_point_density_vs_rank(embeds, distribution_name)
+    
+if __name__ == "__main__":
+
+    datasets_paths = {
+        "MsMarco": "C:/Projects/DimCache/datasets/embeds_msmarco.pkl",
+        "WildChat": "C:/Projects/DimCache/datasets/embeds_wildchat.pkl",
+        "ELI5": "C:/Projects/DimCache/datasets/embeds_eli5.pkl",
+        "NaturalQuestions": "C:/Projects/DimCache/datasets/embeds_nq.pkl",
+        "StackOverflow": "C:/Projects/DimCache/datasets/embeds_stackoverflow.pkl",
+        "Quora": "C:/Projects/DimCache/datasets/embeds_quora_qp.pkl",
     }
 
-# Define the order of metrics and the corresponding row labels
-metrics_order = [
-    ("cosine_sim_mean", "Mean Cosine Sim."),
-    ("cosine_sim_std", "Std Cosine Sim."),
-    ("euclidean_dist_mean", "Mean Eucl. Dist."),
-    ("euclidean_dist_std", "Std Eucl. Dist."),
-    ("pca_entropy", "PCA Entropy"),
-    ("mean_cluster_size", "Mean Cluster Size"),
-    ("std_cluster_size", "Std Cluster Size"),
-]
+    results = {}
 
-# Get the list of datasets for columns
-dataset_names = list(results.keys())
+    # Calculate metrics and store them
+    for dataset_name, file_path in datasets_paths.items():
+        with open(file_path, "rb") as f:
+            data = pickle.load(f)
 
-# Print results in a LaTeX table with metrics as rows and datasets as columns
-print(r"\begin{table}[ht]")
-print(r"\centering")
+        # Use a subset of embeddings if needed
+        embeds = data['normalized_embeds'][:20000]
+        # hypersphere_coverage(embeds, 1000, 1.0)
+        compare_density_estimator(embeds)
+        continue
+        #plot_pca(embeds, f"{dataset_name}_pca.png")
+        #plot_tsne(embeds, f"{dataset_name}_tsne.png")
+        clusters_ids = cluster_complete_linkage_faiss(embeds, 0.5)
+        clusters_sizes_dict = Counter(clusters_ids)
+        clusters_sizes = list(clusters_sizes_dict.values())
+        mean_cluster_size = np.mean(clusters_sizes)
+        std_cluster_size = np.std(clusters_sizes)
+        
+        # Calculate the pairwise statistics
+        cs_mean, cs_std, ed_mean, ed_std = calculate_pairwise_statistics(embeds)
+        
+        # Calculate entropy of principal components
+        pca_ent = calculate_entropy_of_principal_components(embeds)
+        
+        # Store results in a dictionary
+        results[dataset_name] = {
+            "cosine_sim_mean": cs_mean,
+            "cosine_sim_std": cs_std,
+            "euclidean_dist_mean": ed_mean,
+            "euclidean_dist_std": ed_std,
+            "pca_entropy": pca_ent,
+            "mean_cluster_size": mean_cluster_size,
+            "std_cluster_size": std_cluster_size
+        }
 
-# Dynamically build the column header: one column for the metric labels + one per dataset
-column_headers = " & " + " & ".join(dataset_names) + r" \\"
-num_cols = len(dataset_names) + 1
 
-print(r"\begin{tabular}{" + "l" + "c" * (num_cols - 1) + "}")
-print(r"\hline")
-print(column_headers)
-print(r"\hline")
 
-# Print each metric as a row
-for metric_key, metric_label in metrics_order:
-    row_values = []
-    for ds_name in dataset_names:
-        # Format the number (4 decimal places)
-        val = results[ds_name][metric_key]
-        row_values.append(f"{val:.4f}")
-    
-    row_string = metric_label + " & " + " & ".join(row_values) + r" \\"
-    print(row_string)
+    # Define the order of metrics and the corresponding row labels
+    metrics_order = [
+        ("cosine_sim_mean", "Mean Cosine Sim."),
+        ("cosine_sim_std", "Std Cosine Sim."),
+        ("euclidean_dist_mean", "Mean Eucl. Dist."),
+        ("euclidean_dist_std", "Std Eucl. Dist."),
+        ("pca_entropy", "PCA Entropy"),
+        ("mean_cluster_size", "Mean Cluster Size"),
+        ("std_cluster_size", "Std Cluster Size"),
+    ]
 
-print(r"\hline")
-print(r"\end{tabular}")
-print(r"\caption{Pairwise similarity, distance, and PCA entropy metrics (rows) across datasets (columns).}")
-print(r"\label{tab:embedding_stats_transposed}")
-print(r"\end{table}")
+    # Get the list of datasets for columns
+    dataset_names = list(results.keys())
+
+    # Print results in a LaTeX table with metrics as rows and datasets as columns
+    print(r"\begin{table}[ht]")
+    print(r"\centering")
+
+    # Dynamically build the column header: one column for the metric labels + one per dataset
+    column_headers = " & " + " & ".join(dataset_names) + r" \\"
+    num_cols = len(dataset_names) + 1
+
+    print(r"\begin{tabular}{" + "l" + "c" * (num_cols - 1) + "}")
+    print(r"\hline")
+    print(column_headers)
+    print(r"\hline")
+
+    # Print each metric as a row
+    for metric_key, metric_label in metrics_order:
+        row_values = []
+        for ds_name in dataset_names:
+            # Format the number (4 decimal places)
+            val = results[ds_name][metric_key]
+            row_values.append(f"{val:.4f}")
+        
+        row_string = metric_label + " & " + " & ".join(row_values) + r" \\"
+        print(row_string)
+
+    print(r"\hline")
+    print(r"\end{tabular}")
+    print(r"\caption{Pairwise similarity, distance, and PCA entropy metrics (rows) across datasets (columns).}")
+    print(r"\label{tab:embedding_stats_transposed}")
+    print(r"\end{table}")

@@ -22,7 +22,7 @@ dataset_filenames = {
     "StackOverflow": "datasets/embeds_stackoverflow.pkl",
 }
 
-NUM_PROCS = 8
+NUM_PROCS = 1
 
 
 def plot():
@@ -159,19 +159,20 @@ def recall():
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 32000
+    num_samples = 10000
     MAX_CACHE_SIZE = 0.1
     COUNT_STEPS = 10
     dim = 384
-    same_embed_distance = 0.5
+    same_embed_distance = 1.0
 
     faiss_indices_names = {"HotSwap"}
     caches_names = {
         #"NaiveRVB",
         #"ClusterRVB",
-        #"SurprisalLFU",
+        "SphereLFU",
+        "SurprisalLFU",
         #"Surprisal",
-        "SampleCache",
+        #"SampleCache",
         "LFU",
         #"MissLFU",
         "LRU",
@@ -185,7 +186,6 @@ def main():
         #"RR",
         #"DistanceLFU",
         #"RAP",
-        #"SphereLFU",
     }
 
     processor = Processor(NUM_PROCS)

@@ -22,6 +22,9 @@ class Cache:
         self.capacity = capacity
         self.index = index
 
+    def update_metadata(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        raise NotImplementedError("virtual method")
+
     def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
         raise NotImplementedError("virtual method")
 
@@ -389,6 +392,129 @@ class Surprisal(SimpleCache):
         return -calculate_surprisal(embed_text)
     
 class SphereQueryLFU(Cache):
+    def __init__(self, same_embed_distance):
+        super().__init__(same_embed_distance)
+
+    def initialize(self, capacity: int, index):
+        # Use a dict mapping embed_id -> frequency (access count)
+        self.items = {}
+        self.halve_counter = 0
+        super().initialize(capacity, index)
+    
+    def update_counters(self, distances, embeds_ids):
+        """
+        distances  : list / 1D array of L2 distances for hits of ONE query
+        embeds_ids : list of embed_ids corresponding to distances
+
+        Side effect:
+            Updates self.items[eid] by adding posterior responsibility
+
+        returns:
+            np.ndarray of counter increments (same length), summing to 1
+        """
+        d = np.asarray(distances, dtype=np.float64)
+        ids = np.asarray(embeds_ids)
+
+        assert len(d) == len(ids), "distances and embeds_ids must align"
+
+        K = len(d)
+        if K == 0:
+            return
+
+        # --- hyperparameters ---
+        alpha = getattr(self, "alpha", 1e-3)
+
+        # Ensure kappa exists (derived from semantic threshold)
+        if not hasattr(self, "kappa") or self.kappa is None:
+            D = float(getattr(self, "same_embed_distance", 1.0))
+            eps = float(getattr(self, "eps_at_threshold", 0.1))
+            self.kappa = 2.0 * np.log(1.0 / eps) / (D * D)
+
+        # --- prior from current counters ---
+        counts = np.array(
+            [self.items.get(eid, 0.0) for eid in ids],
+            dtype=np.float64
+        )
+        prior = counts + alpha
+
+        # --- likelihood from distances ---
+        log_likelihood = -0.5 * self.kappa * (d ** 2)
+
+        # --- unnormalized log posterior ---
+        logw = np.log(prior) + log_likelihood
+
+        # --- numerical stabilization ---
+        m = np.max(logw)
+        w = np.exp(logw - m)
+        s = w.sum()
+
+        if not np.isfinite(s) or s <= 0.0:
+            # fallback: uniform responsibility
+            r = np.full(K, 1.0 / K, dtype=np.float64)
+        else:
+            r = w / s
+
+        # --- UPDATE COUNTERS ---
+        for eid, ri in zip(ids, r):
+            self.items[eid] = self.items.get(eid, 0.0) + float(ri)
+
+        return r
+    
+    def halve_counters(self):
+        self.halve_counter = 0
+        for eid in self.items:
+            self.items[eid] *= 0.5
+    
+    def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        closest_dists, closest_ids = self.get_in_range_stored_embeds(embeds, self.same_embed_distance)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.count_nonzero(mask, axis=1)
+        evicted_items = []
+        additions_embeds = []
+        additions_ids = []
+        insert_candidates_indices = []
+        for i_embed, embed_id in enumerate(embeds_ids):
+            hits = closest_ids[i_embed]
+            if len(hits) == 0:
+                insert_candidates_indices.append(i_embed)
+            else:
+                self.halve_counter += 1
+                distances = closest_dists[i_embed]
+                self.update_counters(distances, hits)
+        
+        if self.halve_counter >= self.capacity:
+            self.halve_counters()
+        
+        max_needed_space = len(insert_candidates_indices)
+        current_size = self.size()
+        max_count_remove = max(0, (current_size + max_needed_space) - self.capacity)
+        if max_count_remove > 0:
+            least_used = heapq.nsmallest(max_count_remove, self.items.items(), key=lambda x: x[1])
+            for _ in range(max_count_remove):
+                evict_cand_id, evict_cand_counter = least_used[0]
+                probability_evict = 1 / (evict_cand_counter + 1)
+                if random.random() < probability_evict:
+                    least_used.pop(0)
+                    del self.items[evict_cand_id]
+                    evicted_items.append(evict_cand_id)
+                else:
+                    x = 3
+        for i_embed in insert_candidates_indices:
+            if self.size() >= self.capacity:
+                break
+            embed = embeds[i_embed]
+            embed_id = embeds_ids[i_embed]
+            self.items[embed_id] = 0
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
+        if evicted_items:
+            self.remove_ids(np.array(evicted_items))
+        if additions_ids:
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        return cache_hits, evicted_items
+
+class SphereDistanceQueryLFU(Cache):
     def __init__(self, same_embed_distance):
         super().__init__(same_embed_distance)
 

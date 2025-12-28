@@ -1,7 +1,7 @@
 from collections import defaultdict
 from typing import Optional, Dict, Set, Tuple
 import numpy as np
-from src.vector_stores.naive_interface import NaiveVectorStore
+from vector_stores.naive_interface import NaiveVectorStore
 # Check about removing from index bug!
 class OnlineClusters:
     def __init__(self, cluster_distance: float, dim: int):
