@@ -1,5 +1,7 @@
 import os
 
+import h5py
+
 # Increase timeout to 100 seconds (default is 10)
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0" # Disable fast transfer if enabled, sometimes causes issues
 os.environ["HF_HUB_ETAG_TIMEOUT"] = "100"
@@ -33,7 +35,7 @@ def writer(path: str):
     if os.path.exists(path):
         f = None
     else:
-        f = NamedTemporaryFile(mode="wb", delete=False)
+        f = NamedTemporaryFile(mode="w+b", delete=False)
         tmp_path = f.name
     try:
         yield f
@@ -54,15 +56,15 @@ def pack_and_dump(path: str, texts: List[str], meta: Dict[str, List[Any]], model
         if f is None:
             print(f'Skipping "{path}" because it already exists')
             return
-        embeds = embed_strings(texts, model_name=model_name)
+        embeds = embed_strings(texts[:100000], model_name=model_name)
         normalized_embeds = normalize(embeds)
-        payload = {
-            "text": texts,
-            "normalized_embeds": normalized_embeds,
-            "embeds": embeds,
-            "meta": meta
-        }
-        pickle.dump(payload, f)
+        with h5py.File(f, "w") as hf:
+            hf.create_dataset("embeds", data=embeds)
+            hf.create_dataset("normalized_embeds", data=normalized_embeds)
+            dt = h5py.string_dtype(encoding='utf-8')
+            texts = [t.replace('\x00', '') for t in texts]
+            hf.create_dataset("text", data=texts, dtype=dt)
+    print(f"Saved HDF5 to {path}")
 
 def build_eli5() -> Tuple[List[str], Dict[str, List[Any]]]:
     ds = load_dataset("sentence-transformers/eli5", trust_remote_code=True)
@@ -134,6 +136,7 @@ def build_stackoverflow() -> Tuple[List[str], Dict[str, List[Any]]]:
     ds = load_dataset("pacovaldez/stackoverflow-questions")
     # Can also get the questions themselves
     texts = concatenate_datasets([ds[s] for s in ('train','validation','test')])['title']
+    meta = {}
     return texts, meta
 
 def build_quora() -> Tuple[List[str], Dict[str, List[Any]]]:
@@ -161,11 +164,7 @@ def build_mmlu() -> Tuple[List[str], Dict[str, List[Any]]]:
     # MMLU (Massive Multitask Language Understanding)
     # The 'all' config loads all subjects (STEM, humanities, etc.)
     print("Loading MMLU (config: 'all')...")
-    try:
-        ds = load_dataset("cais/mmlu", "all")
-    except:
-        # Fallback if 'all' config isn't immediately found in some versions
-        ds = load_dataset("cais/mmlu", "auxiliary_train")
+    ds = load_dataset("cais/mmlu", "all")
         
     texts = []
     # Iterate over available splits (usually 'test', 'validation', 'dev', 'auxiliary_train')
@@ -223,6 +222,18 @@ def build_msmarco() -> Tuple[List[str], Dict[str, List[Any]]]:
 if __name__ == "__main__":
     os.makedirs(embeds_dir, exist_ok=True)
 
+    print("generating StackOverflow...")
+    texts, meta = build_stackoverflow()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_stackoverflow.pkl"), texts, meta)
+
+    print("generating Quora Question Pairs...")
+    texts, meta = build_quora()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_quora_qp.pkl"), texts, meta)
+
+    print("generating WildChat...")
+    texts, meta = build_wildchat()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_wildchat.pkl"), texts, meta)
+
     print("generating TriviaQA...")
     texts, meta = build_triviaqa()
     pack_and_dump(os.path.join(embeds_dir, "embeds_triviaqa.pkl"), texts, meta)
@@ -239,24 +250,12 @@ if __name__ == "__main__":
     texts, meta = build_eli5()
     pack_and_dump(os.path.join(embeds_dir, "embeds_eli5.pkl"), texts, meta)
 
-    print("generating WildChat...")
-    texts, meta = build_wildchat()
-    pack_and_dump(os.path.join(embeds_dir, "embeds_wildchat.pkl"), texts, meta)
-
     print("generating Natural Questions...")
     texts, meta = build_nq()
     pack_and_dump(os.path.join(embeds_dir, "embeds_nq.pkl"), texts, meta)
-
+    
     print("generating MS MARCO...")
     texts, meta = build_msmarco()
     pack_and_dump(os.path.join(embeds_dir, "embeds_msmarco.pkl"), texts, meta)
-
-    print("generating StackOverflow...")
-    texts, meta = build_stackoverflow() if 'meta' in locals() else build_stackoverflow()[0], {} 
-    pack_and_dump(os.path.join(embeds_dir, "embeds_stackoverflow.pkl"), texts, meta)
-
-    print("generating Quora Question Pairs...")
-    texts, meta = build_quora()
-    pack_and_dump(os.path.join(embeds_dir, "embeds_quora_qp.pkl"), texts, meta)
-
+    
     print("Done.")

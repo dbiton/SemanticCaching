@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 import faiss
+import h5py
 import numpy as np
 import tqdm
 import multiprocessing as mp
@@ -60,10 +61,11 @@ def yield_batch_slices(total_size, batch_size):
 
 def load_embeds(dataset_name: str, N: int):
     path = dataset_filenames[dataset_name]
-    with open(path, "rb") as f:
-        data = pickle.load(f)
-    embeds_texts = data["text"][:N]
-    embeds = np.array(data["normalized_embeds"][:N], dtype=np.float32)
+    with h5py.File(path, "r") as f:
+        embeds = f["normalized_embeds"][:N]
+        text_bytes = f["text"][:N]
+        embeds_texts = [t.decode("utf-8") for t in text_bytes]
+    embeds = np.array(embeds, dtype=np.float32)
     return embeds, embeds_texts
 
 def get_hnsw_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):

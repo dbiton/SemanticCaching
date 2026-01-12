@@ -26,7 +26,7 @@ dataset_filenames = {
     "HotPotQA": "datasets/embeds_hotpotqa.pkl",
 }
 
-NUM_PROCS = 3
+NUM_PROCS = 8
 
 
 def plot():
@@ -219,7 +219,7 @@ def main():
 def compare_crvb():
     batch_size = 1
     count_nn = 1
-    num_samples = 1000
+    num_samples = 5000
     CAHCE_SIZE = 0.1
     MIN_DIS = 0.5
     MAX_DIS = 1.0
