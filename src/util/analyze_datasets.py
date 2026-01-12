@@ -118,7 +118,7 @@ def plot_point_density_vs_rank(embeds, distribution_name):
     Creates multiple lines for semantic equivalence distances from 0.5 to 1.5 in 0.1 increments.
     """
     # Create figure with log-log scale
-    plt.figure(figsize=(12, 7))
+    plt.figure()
     
     # Semantic equivalence distances to test
     distances = np.arange(0.5, 1.6, 0.1)  # 0.5, 0.6, ..., 1.5
@@ -139,8 +139,8 @@ def plot_point_density_vs_rank(embeds, distribution_name):
     plt.ylabel('Point Density (Count)', fontsize=12)
     plt.xscale('log')
     plt.yscale('log')
-    plt.title(f'Point Density vs Rank - {distribution_name}', fontsize=14)
-    plt.legend(fontsize=10, loc='best')
+    # plt.title(f'Point Density vs Rank - {distribution_name}', fontsize=14)
+    # plt.legend(fontsize=10, loc='best')
     plt.grid(True, alpha=0.3, which='both')
     plt.tight_layout()
     plt.savefig(f'{distribution_name}_point_density_distances.png', dpi=100)
@@ -350,6 +350,67 @@ def compare_density_estimator(embeds, threshold=0.75):
     
     return results
 
+def hopkins_statistic(embeds, sample_fraction=1):
+    """
+    Calculates the Hopkins statistic to measure the clustering tendency of data.
+    
+    Formula: H = sum(W) / (sum(U) + sum(W))
+    where:
+      - W: Nearest neighbor distances from uniformly generated random points to real data
+      - U: Nearest neighbor distances from sample real points to other real data
+    
+    Interpretation:
+      - H near 0.5: Data is uniformly distributed (random)
+      - H near 1.0: Data is highly clustered (values > 0.75 indicate clustering)
+    """
+    embeds = np.asarray(embeds).astype('float32')
+    n, d = embeds.shape
+    
+    # 1. Determine sample size (m)
+    m = int(n * sample_fraction)
+    if m < 1: m = 1
+    
+    # 2. Build FAISS index for efficient search
+    index = faiss.IndexFlatL2(d)
+    index.add(embeds)
+    
+    # 3. Generate m synthetic points (Y) uniformly within the data's bounding box
+    mins = np.min(embeds, axis=0)
+    maxs = np.max(embeds, axis=0)
+    
+    # Generate random points in the hypercube defined by mins/maxs
+    Y = np.random.uniform(mins, maxs, (m, d)).astype('float32')
+    
+    # 4. Calculate W: Distances from synthetic points (Y) to nearest real neighbor
+    # search returns (distances_squared, indices)
+    W_sq, _ = index.search(Y, 1)
+    W = np.sqrt(W_sq).flatten() # Convert squared L2 to L2
+    
+    # 5. Calculate U: Distances from sampled real points (X) to their nearest neighbor
+    # We sample indices from the real data
+    real_indices = np.random.choice(n, m, replace=False)
+    X = embeds[real_indices]
+    
+    # We search for 2 nearest neighbors because the 1st NN of a point X 
+    # is X itself (distance 0). We need the 2nd one.
+    U_sq, _ = index.search(X, 2)
+    
+    # Take the 2nd column (index 1) which is the nearest *other* neighbor
+    U = np.sqrt(U_sq[:, 1]).flatten()
+    
+    # 6. Compute Hopkins Statistic
+    sum_W = np.sum(W)
+    sum_U = np.sum(U)
+    
+    # Avoid division by zero
+    if sum_U + sum_W == 0:
+        return 0.5
+        
+    H = sum_W / (sum_U + sum_W)
+    
+    print(f"Hopkins Statistic: {H:.4f}")
+    return H
+
 
 def analyze_embeds(embeds, distribution_name):
     plot_point_density_vs_rank(embeds, distribution_name)
@@ -363,6 +424,9 @@ if __name__ == "__main__":
         "NaturalQuestions": "C:/Projects/DimCache/datasets/embeds_nq.pkl",
         "StackOverflow": "C:/Projects/DimCache/datasets/embeds_stackoverflow.pkl",
         "Quora": "C:/Projects/DimCache/datasets/embeds_quora_qp.pkl",
+        "MMLU": "C:/Projects/DimCache/datasets/embeds_mmlu.pkl",
+        "TriviaQA": "C:/Projects/DimCache/datasets/embeds_triviaqa.pkl",
+        "HotPotQA": "C:/Projects/DimCache/datasets/embeds_hotpotqa.pkl",
     }
 
     results = {}
@@ -373,10 +437,13 @@ if __name__ == "__main__":
             data = pickle.load(f)
 
         # Use a subset of embeddings if needed
-        embeds = data['normalized_embeds'][:20000]
+        embeds = data['normalized_embeds'][:10000]
         # hypersphere_coverage(embeds, 1000, 1.0)
-        compare_density_estimator(embeds)
-        continue
+        
+        analyze_embeds(embeds, dataset_name)
+        hopkins = hopkins_statistic(embeds)
+        
+        # compare_density_estimator(embeds)
         #plot_pca(embeds, f"{dataset_name}_pca.png")
         #plot_tsne(embeds, f"{dataset_name}_tsne.png")
         clusters_ids = cluster_complete_linkage_faiss(embeds, 0.5)
@@ -399,21 +466,9 @@ if __name__ == "__main__":
             "euclidean_dist_std": ed_std,
             "pca_entropy": pca_ent,
             "mean_cluster_size": mean_cluster_size,
-            "std_cluster_size": std_cluster_size
+            "std_cluster_size": std_cluster_size,
+            "hopkins": hopkins,
         }
-
-
-
-    # Define the order of metrics and the corresponding row labels
-    metrics_order = [
-        ("cosine_sim_mean", "Mean Cosine Sim."),
-        ("cosine_sim_std", "Std Cosine Sim."),
-        ("euclidean_dist_mean", "Mean Eucl. Dist."),
-        ("euclidean_dist_std", "Std Eucl. Dist."),
-        ("pca_entropy", "PCA Entropy"),
-        ("mean_cluster_size", "Mean Cluster Size"),
-        ("std_cluster_size", "Std Cluster Size"),
-    ]
 
     # Get the list of datasets for columns
     dataset_names = list(results.keys())
@@ -432,14 +487,14 @@ if __name__ == "__main__":
     print(r"\hline")
 
     # Print each metric as a row
-    for metric_key, metric_label in metrics_order:
+    for metric_key in results[dataset_names[0]].keys():
         row_values = []
         for ds_name in dataset_names:
             # Format the number (4 decimal places)
             val = results[ds_name][metric_key]
             row_values.append(f"{val:.4f}")
-        
-        row_string = metric_label + " & " + " & ".join(row_values) + r" \\"
+        metric_name = metric_key.replace("_", " ").title()
+        row_string = metric_name + " & " + " & ".join(row_values) + r" \\"
         print(row_string)
 
     print(r"\hline")

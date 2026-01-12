@@ -30,18 +30,21 @@ from caches.cache import (
 from caches.arc import ARC
 from caches.cluster_lru import ClusterLRU
 from caches.lru_k import LRUK
-from caches.OPT import OPT, ClusterOPT
+from caches.OPT import OPT, ClusterOPT, CoverOPT
 from vector_stores.hnswlib_interface import HNSWVectorStore
 from vector_stores.milvus_interface import MilvusVectorStore
 from vector_stores.naive_interface import NaiveVectorStore
 
 dataset_filenames = {
-    "Quora": "datasets/embeds_quora_qp.pkl",
-    "ELI5": "datasets/embeds_eli5.pkl",
-    "NaturalQuestions": "datasets/embeds_nq.pkl",
     "MsMarco": "datasets/embeds_msmarco.pkl",
     "WildChat": "datasets/embeds_wildchat.pkl",
+    "ELI5": "datasets/embeds_eli5.pkl",
+    "NaturalQuestions": "datasets/embeds_nq.pkl",
     "StackOverflow": "datasets/embeds_stackoverflow.pkl",
+    "Quora": "datasets/embeds_quora_qp.pkl",
+    "MMLU": "datasets/embeds_mmlu.pkl",
+    "TriviaQA": "datasets/embeds_triviaqa.pkl",
+    "HotPotQA": "datasets/embeds_hotpotqa.pkl",
 }
 
 
@@ -173,6 +176,7 @@ def _run_single_worker(args):
         "DistanceLFU": (DistanceLFU, same_embed_distance),
         "RAP": (RAP, same_embed_distance),
         "SphereLFU": (SphereQueryLFU, same_embed_distance),
+        "CoverOPT": (CoverOPT, same_embed_distance, total_embeds)
     }
     indices = {
         "milvus-lite": get_flat_index_milvus_lite,

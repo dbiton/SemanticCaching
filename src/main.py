@@ -1,4 +1,5 @@
 import json
+import math
 import sys
 import pandas as pd
 
@@ -14,15 +15,18 @@ from processor import Processor
 
 # use only text, embeds - remove normalized embeds
 dataset_filenames = {
-    "Quora": "datasets/embeds_quora_qp.pkl",
-    "ELI5": "datasets/embeds_eli5.pkl",
-    "NaturalQuestions": "datasets/embeds_nq.pkl",
     "MsMarco": "datasets/embeds_msmarco.pkl",
     "WildChat": "datasets/embeds_wildchat.pkl",
+    "ELI5": "datasets/embeds_eli5.pkl",
+    "NaturalQuestions": "datasets/embeds_nq.pkl",
     "StackOverflow": "datasets/embeds_stackoverflow.pkl",
+    "Quora": "datasets/embeds_quora_qp.pkl",
+    "MMLU": "datasets/embeds_mmlu.pkl",
+    "TriviaQA": "datasets/embeds_triviaqa.pkl",
+    "HotPotQA": "datasets/embeds_hotpotqa.pkl",
 }
 
-NUM_PROCS = 1
+NUM_PROCS = 3
 
 
 def plot():
@@ -159,18 +163,19 @@ def recall():
 def main():
     batch_size = 1
     count_nn = 1
-    num_samples = 10000
+    num_samples = 50000
     MAX_CACHE_SIZE = 0.1
     COUNT_STEPS = 10
     dim = 384
-    same_embed_distance = 1.0
+    same_embed_distance = 0.85
 
     faiss_indices_names = {"HotSwap"}
     caches_names = {
-        #"NaiveRVB",
+        "NaiveRVB",
         #"ClusterRVB",
+        #"CoverOPT",
         "SphereLFU",
-        "SurprisalLFU",
+        #"SurprisalLFU",
         #"Surprisal",
         #"SampleCache",
         "LFU",
@@ -214,14 +219,14 @@ def main():
 def compare_crvb():
     batch_size = 1
     count_nn = 1
-    num_samples = 100000
+    num_samples = 1000
     CAHCE_SIZE = 0.1
     MIN_DIS = 0.5
     MAX_DIS = 1.0
-    COUNT_DIS = 6
+    COUNT_DIS = 10
     
     faiss_indices_names = {"HotSwap"}
-    caches_names = {"NaiveRVB", "ClusterRVB", "LFU"}
+    caches_names = {"CoverOPT", "NaiveRVB", "ClusterRVB"}
 
     processor = Processor(NUM_PROCS)
 
@@ -425,92 +430,93 @@ def plot_compare_index_runtime():
 
 
 def plot_compare_crvb():
-    df = []
+    # 1. Load Data
+    data = []
     with open("results-crvb.json", "r") as f:
         for line in f:
-            line = line.strip()
-            if line:
-                df.append(json.loads(line))
-    df = pd.DataFrame(df)
+            if line.strip():
+                data.append(json.loads(line))
+    
+    # Convert directly to DataFrame
+    df = pd.DataFrame(data)
 
-    df_data = []  # was {} — needs to be a list
-    for dataset_name in set(df["Dataset"]):
-        for eps in set(df["Same Embed Distance"]):
-            nrvb_rows = df[
-                (df["Dataset"] == dataset_name)
-                & (df["Same Embed Distance"] == eps)
-                & (df["Cache Name"] == "NaiveRVB")
-            ]
-            crvb_rows = df[
-                (df["Dataset"] == dataset_name)
-                & (df["Same Embed Distance"] == eps)
-                & (df["Cache Name"] == "ClusterRVB")
-            ]
-            lfu_rows = df[
-                (df["Dataset"] == dataset_name)
-                & (df["Same Embed Distance"] == eps)
-                & (df["Cache Name"] == "LFU")
-            ]
-            if nrvb_rows.empty or crvb_rows.empty:
-                continue
-            hr_nrvb = nrvb_rows["Hit Rate"].iloc[0]
-            hr_crvb = crvb_rows["Hit Rate"].iloc[0]
-            hr_lfu = lfu_rows["Hit Rate"].iloc[0]
-            ratio_nrvb = (hr_nrvb / hr_crvb ) if hr_crvb else float("nan")
-            ratio_lfu = (hr_crvb / hr_lfu) if hr_lfu else float("nan")
-            ratio_grvb = (hr_nrvb / hr_lfu) if hr_lfu else float("nan")
-            df_data.append({"Dataset": dataset_name, "D": eps, "ratio_nrvb": ratio_nrvb, "ratio_lfu": ratio_lfu, "ratio_grvb": ratio_grvb})
+    # 2. Filter for the three specific policies
+    target_policies = ["NaiveRVB", "ClusterRVB", "CoverOPT"]
+    df = df[df["Cache Name"].isin(target_policies)]
+    
+    # Ensure Hit Rate is numeric
+    df["Hit Rate"] = pd.to_numeric(df["Hit Rate"])
 
-    figures_dir = "figures"
+    # 3. Setup "Small Multiples" Grid (One plot per dataset)
+    datasets = sorted(df["Dataset"].unique())
+    n_datasets = len(datasets)
+    cols = 3
+    rows = math.ceil(n_datasets / cols)
+    
+    # Create the figure
+    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows), sharex=True)
+    axes = axes.flatten()
 
-    # Compute global min/max across all three ratios to ensure consistent color scale
-    all_values = pd.concat([
-        pd.DataFrame(df_data)["ratio_nrvb"],
-        pd.DataFrame(df_data)["ratio_lfu"],
-        pd.DataFrame(df_data)["ratio_grvb"]
-    ])
-    #vmin, vmax = all_values.min(), all_values.max()
+    # Define consistent styles
+    styles = {
+        "CoverOPT": {"color": "#1f77b4", "marker": "o"},
+        "ClusterRVB": {"color": "#ff7f0e", "marker": "s"}, # Likely your TGRVB
+        "NaiveRVB": {"color": "#2ca02c", "marker": "^"}   # Likely your VGRVB
+    }
 
-    cmap = sns.diverging_palette(10, 133, as_cmap=True)  # red-green
-    sns.set(font_scale=1.5)
-    for ratio, fname in [
-        ("ratio_nrvb", "ratio_nrvb.png"),
-        ("ratio_lfu", "ratio_lfu.png"),
-        ("ratio_grvb", "ratio_grvb.png"),
-    ]:
-        heat = pd.DataFrame(df_data).pivot(index="Dataset", columns="D", values=ratio)
-        plt.figure()
-        ax = sns.heatmap(
-            heat,
-            annot=True,
-            fmt=".2f",
-            cmap=cmap,
-            cbar=False,
-            center=1,        # red < 1, green > 1
+    # 4. Loop through datasets and plot Absolute Hit Rate
+    for i, dataset in enumerate(datasets):
+        ax = axes[i]
+        subset = df[df["Dataset"] == dataset]
+        
+        # Plot lines
+        sns.lineplot(
+            data=subset,
+            x="Same Embed Distance",
+            y="Hit Rate",
+            hue="Cache Name",
+            style="Cache Name",
+            markers=True,
+            dashes=False,
+            palette={k: v["color"] for k, v in styles.items()},
+            ax=ax
         )
-        ax.set_xticklabels([f"{float(x.get_text()):.2f}" for x in ax.get_xticklabels()])
+        
+        # Formatting
+        ax.set_yscale("log")
+        ax.set_title(dataset, fontweight='bold')
+        ax.set_ylabel("Absolute Hit Rate")
+        ax.set_xlabel(r"$D_{thresh}$")
+        ax.set_ylim(0, 1.05)  # Standardize Y-axis to 0-100%
+        ax.grid(True, linestyle='--', alpha=0.3)
+        ax.get_legend().remove()  # Hide individual legends to reduce clutter
 
-        # Remove the automatic "Dataset" label
-        ax.set_ylabel("")
+    # 5. Hide unused subplots (if any)
+    for j in range(i + 1, len(axes)):
+        fig.delaxes(axes[j])
 
-        # Rename "D" to "threshold distance"
-        ax.set_xlabel(r"$D_{\text{thresh}}$")
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(figures_dir, fname))
-        plt.close()
-
+    # 6. Add a single Global Legend at the bottom
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', ncol=3, bbox_to_anchor=(0.5, 0.0), fontsize=12)
+    
+    plt.tight_layout()
+    plt.subplots_adjust(bottom=0.08) # Make space for the legend
+    
+    # Save and Show
+    plt.savefig("figures/absolute_hit_rate_comparison.pdf", bbox_inches='tight')
+    plt.show()
+    
 if __name__ == "__main__":
     #mv = MilvusVectorStore()
     #mv.drop_all()
     #recall()
-    main()
-    plot()
+    #main()
+    #plot()
     
     #compare_vector_stores()
     #plot_compare_vector_stores()
     
     #compare_index_runtime()
     #plot_compare_index_runtime()
-    #compare_crvb()
-    #plot_compare_crvb()
+    compare_crvb()
+    plot_compare_crvb()

@@ -1,5 +1,10 @@
-from itertools import chain
 import os
+
+# Increase timeout to 100 seconds (default is 10)
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0" # Disable fast transfer if enabled, sometimes causes issues
+os.environ["HF_HUB_ETAG_TIMEOUT"] = "100"
+os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "100"
+
 import pickle
 import numpy as np
 from typing import *
@@ -152,6 +157,51 @@ def build_quora() -> Tuple[List[str], Dict[str, List[Any]]]:
     }
     return texts, meta
 
+def build_mmlu() -> Tuple[List[str], Dict[str, List[Any]]]:
+    # MMLU (Massive Multitask Language Understanding)
+    # The 'all' config loads all subjects (STEM, humanities, etc.)
+    print("Loading MMLU (config: 'all')...")
+    try:
+        ds = load_dataset("cais/mmlu", "all")
+    except:
+        # Fallback if 'all' config isn't immediately found in some versions
+        ds = load_dataset("cais/mmlu", "auxiliary_train")
+        
+    texts = []
+    # Iterate over available splits (usually 'test', 'validation', 'dev', 'auxiliary_train')
+    for split in ds:
+        if "question" in ds[split].features:
+            texts.extend(ds[split]["question"])
+            
+    meta = {}
+    return texts, meta
+
+def build_hotpotqa() -> Tuple[List[str], Dict[str, List[Any]]]:
+    # HotpotQA (Multi-hop reasoning)
+    print("Loading HotpotQA...")
+    ds = load_dataset("hotpot_qa", "distractor")    
+    texts = []
+    # Splits: 'train', 'validation'
+    for split in ds:
+        texts.extend(ds[split]["question"])
+        
+    meta = {}
+    return texts, meta
+
+def build_triviaqa() -> Tuple[List[str], Dict[str, List[Any]]]:
+    # TriviaQA
+    # 'rc' (Reading Comprehension) is the standard configuration
+    print("Loading TriviaQA (config: 'rc')...")
+    ds = load_dataset("mandarjoshi/trivia_qa", "rc")
+    
+    texts = []
+    # Splits: 'train', 'validation', 'test'
+    for split in ds:
+        texts.extend(ds[split]["question"])
+        
+    meta = {}
+    return texts, meta
+
 def build_nq() -> Tuple[List[str], Dict[str, List[Any]]]:
     texts = []
     ds = load_dataset("nq_open")
@@ -173,27 +223,39 @@ def build_msmarco() -> Tuple[List[str], Dict[str, List[Any]]]:
 if __name__ == "__main__":
     os.makedirs(embeds_dir, exist_ok=True)
 
-    print("generating ELI5...") #V
+    print("generating TriviaQA...")
+    texts, meta = build_triviaqa()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_triviaqa.pkl"), texts, meta)
+
+    print("generating HotpotQA...")
+    texts, meta = build_hotpotqa()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_hotpotqa.pkl"), texts, meta)
+    
+    print("generating MMLU...")
+    texts, meta = build_mmlu()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_mmlu.pkl"), texts, meta)
+    
+    print("generating ELI5...")
     texts, meta = build_eli5()
     pack_and_dump(os.path.join(embeds_dir, "embeds_eli5.pkl"), texts, meta)
 
-    print("generating WildChat...") #V
+    print("generating WildChat...")
     texts, meta = build_wildchat()
     pack_and_dump(os.path.join(embeds_dir, "embeds_wildchat.pkl"), texts, meta)
 
-    print("generating Natural Questions...") #V
+    print("generating Natural Questions...")
     texts, meta = build_nq()
     pack_and_dump(os.path.join(embeds_dir, "embeds_nq.pkl"), texts, meta)
 
-    print("generating MS MARCO...") #V
+    print("generating MS MARCO...")
     texts, meta = build_msmarco()
     pack_and_dump(os.path.join(embeds_dir, "embeds_msmarco.pkl"), texts, meta)
 
-    print("generating StackOverflow...") #V
-    texts, meta = build_stackoverflow()
+    print("generating StackOverflow...")
+    texts, meta = build_stackoverflow() if 'meta' in locals() else build_stackoverflow()[0], {} 
     pack_and_dump(os.path.join(embeds_dir, "embeds_stackoverflow.pkl"), texts, meta)
 
-    print("generating Quora Question Pairs...") #V
+    print("generating Quora Question Pairs...")
     texts, meta = build_quora()
     pack_and_dump(os.path.join(embeds_dir, "embeds_quora_qp.pkl"), texts, meta)
 

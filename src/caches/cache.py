@@ -494,18 +494,18 @@ class SphereQueryLFU(Cache):
             for _ in range(max_count_remove):
                 evict_cand_id, evict_cand_counter = least_used[0]
                 probability_evict = 1 / (evict_cand_counter + 1)
-                if random.random() < probability_evict:
+                # always evict because seems to work better for my use case!
+                if True:
+                #if random.random() < probability_evict:
                     least_used.pop(0)
                     del self.items[evict_cand_id]
                     evicted_items.append(evict_cand_id)
-                else:
-                    x = 3
         for i_embed in insert_candidates_indices:
             if self.size() >= self.capacity:
                 break
             embed = embeds[i_embed]
             embed_id = embeds_ids[i_embed]
-            self.items[embed_id] = 0
+            self.items[embed_id] = 1
             additions_embeds.append(embed)
             additions_ids.append(embed_id)
         if evicted_items:
