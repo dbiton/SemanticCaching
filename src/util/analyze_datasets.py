@@ -1,4 +1,5 @@
 from collections import Counter
+import itertools
 import pickle
 import faiss
 from matplotlib import pyplot as plt
@@ -7,10 +8,11 @@ from sklearn.manifold import TSNE
 from sklearn.metrics.pairwise import cosine_similarity, pairwise_distances
 from sklearn.decomposition import PCA
 from scipy.stats import entropy
-import sys
+from .fetch_datasets import dataset_filenames, load_embeds
+import seaborn as sns
 
-from reduce_dim import cluster_complete_linkage_faiss
-from density_estimator import DensityEstimator
+from .reduce_dim import cluster_complete_linkage_faiss
+from .density_estimator import DensityEstimator
 
 def calculate_pairwise_statistics(embeddings):
     """
@@ -112,39 +114,66 @@ def point_density(embeds, semantic_equiv_distance=0.75):
 
     return counts
 
+plt.rcParams.update({
+    'figure.figsize': (3.0, 2.5),     # Matches the previous 3-per-row size
+    'font.size': 8,
+    'axes.labelsize': 9,
+    'axes.titlesize': 9,
+    'xtick.labelsize': 8,
+    'ytick.labelsize': 8,
+    'legend.fontsize': 8,
+    'lines.markersize': 4,            # Smaller markers for the smaller plot
+    'lines.linewidth': 1.0,           # Thinner lines for clarity
+    'font.family': 'serif',           # LaTeX standard
+    'axes.grid': True,
+    'grid.alpha': 0.3
+})
+
 def plot_point_density_vs_rank(embeds, distribution_name):
-    """
-    Plot point density (counts) with rank on x-axis and point density on y-axis.
-    Creates multiple lines for semantic equivalence distances from 0.5 to 1.5 in 0.1 increments.
-    """
-    # Create figure with log-log scale
     plt.figure()
+    distances = np.arange(0.5, 1.5, 0.1)
+    markers = itertools.cycle(["o", "s", "^", "v", "D", "<", ">", "X", "+", "*"])
+    count_colors = len(distances)
+    colors = sns.color_palette("tab10", count_colors)
     
-    # Semantic equivalence distances to test
-    distances = np.arange(0.5, 1.6, 0.1)  # 0.5, 0.6, ..., 1.5
+    mark_indices = [int(v-1) for v in np.geomspace(1, len(embeds), 10)]
     
-    for distance in distances:
-        # Calculate point density for each embedding
+    for i, distance in enumerate(distances):
         counts = point_density(embeds, semantic_equiv_distance=distance)
-        
-        # Sort counts in descending order to create rank distribution
         sorted_counts = sorted(counts, reverse=True)
         ranks = np.arange(1, len(sorted_counts) + 1)
-        
-        # Plot the line
-        plt.plot(ranks, sorted_counts, alpha=0.7, linewidth=2, 
-                label=f'Distance = {distance:.1f}')
-    
+        n_points = len(ranks)
+        plt.plot(
+            ranks, 
+            sorted_counts, 
+            alpha=0.7, 
+            linewidth=2, 
+            marker=next(markers),
+            markevery=mark_indices,     # Plots a marker every 'step' points
+            markersize=6,
+            label=f'Distance = {distance:.1f}',
+            color=colors[i]
+        )
     plt.xlabel('Rank', fontsize=12)
     plt.ylabel('Point Density (Count)', fontsize=12)
     plt.xscale('log')
     plt.yscale('log')
-    # plt.title(f'Point Density vs Rank - {distribution_name}', fontsize=14)
-    # plt.legend(fontsize=10, loc='best')
     plt.grid(True, alpha=0.3, which='both')
     plt.tight_layout()
+    handles, labels = plt.gca().get_legend_handles_labels()
     plt.savefig(f'{distribution_name}_point_density_distances.png', dpi=100)
     plt.close()
+    fig_leg, ax_leg = plt.subplots(figsize=(10, 1)) 
+    ax_leg.axis("off")
+    fig_leg.legend(
+        handles, labels,
+        loc="center",
+        ncol=5,  # Adjust columns as needed to fit width
+        frameon=False,
+        fontsize=10
+    )
+    fig_leg.savefig("density_legend.png", bbox_inches="tight", dpi=300)
+    plt.close(fig_leg)
 
 
 def cluster_sizes(embeds, distribution_name):
@@ -412,35 +441,15 @@ def hopkins_statistic(embeds, sample_fraction=1):
     return H
 
 
-def analyze_embeds(embeds, distribution_name):
-    plot_point_density_vs_rank(embeds, distribution_name)
-    
 if __name__ == "__main__":
-
-    datasets_paths = {
-        "MsMarco": "C:/Projects/DimCache/datasets/embeds_msmarco.pkl",
-        "WildChat": "C:/Projects/DimCache/datasets/embeds_wildchat.pkl",
-        "ELI5": "C:/Projects/DimCache/datasets/embeds_eli5.pkl",
-        "NaturalQuestions": "C:/Projects/DimCache/datasets/embeds_nq.pkl",
-        "StackOverflow": "C:/Projects/DimCache/datasets/embeds_stackoverflow.pkl",
-        "Quora": "C:/Projects/DimCache/datasets/embeds_quora_qp.pkl",
-        "MMLU": "C:/Projects/DimCache/datasets/embeds_mmlu.pkl",
-        "TriviaQA": "C:/Projects/DimCache/datasets/embeds_triviaqa.pkl",
-        "HotPotQA": "C:/Projects/DimCache/datasets/embeds_hotpotqa.pkl",
-    }
 
     results = {}
 
     # Calculate metrics and store them
-    for dataset_name, file_path in datasets_paths.items():
-        with open(file_path, "rb") as f:
-            data = pickle.load(f)
-
-        # Use a subset of embeddings if needed
-        embeds = data['normalized_embeds'][:10000]
+    for dataset_name in dataset_filenames:
+        embeds, _ = load_embeds(dataset_name, 50000)
         # hypersphere_coverage(embeds, 1000, 1.0)
-        
-        analyze_embeds(embeds, dataset_name)
+        plot_point_density_vs_rank(embeds, dataset_name)
         hopkins = hopkins_statistic(embeds)
         
         # compare_density_estimator(embeds)

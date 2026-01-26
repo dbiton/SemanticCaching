@@ -22,6 +22,27 @@ embeds_dir = "datasets"
 
 models: Dict[str, SentenceTransformer] = {}
 
+dataset_filenames = {
+    "MsMarco": "datasets/embeds_msmarco.pkl",
+    "WildChat": "datasets/embeds_wildchat.pkl",
+    "ELI5": "datasets/embeds_eli5.pkl",
+    "NaturalQuestions": "datasets/embeds_nq.pkl",
+    "StackOverflow": "datasets/embeds_stackoverflow.pkl",
+    "Quora": "datasets/embeds_quora_qp.pkl",
+    "MMLU": "datasets/embeds_mmlu.pkl",
+    "TriviaQA": "datasets/embeds_triviaqa.pkl",
+    "HotPotQA": "datasets/embeds_hotpotqa.pkl",
+}
+
+def load_embeds(dataset_name: str, N: int):
+    path = dataset_filenames[dataset_name]
+    with h5py.File(path, "r") as f:
+        embeds = f["normalized_embeds"][:N]
+        text_bytes = f["text"][:N]
+        embeds_texts = [t.decode("utf-8") for t in text_bytes]
+    embeds = np.array(embeds, dtype=np.float32)
+    return embeds, embeds_texts
+
 def embed_strings(strings: List[str], model_name: str = "all-MiniLM-L6-v2") -> np.ndarray:
     if model_name not in models:
         models[model_name] = SentenceTransformer(model_name)

@@ -11,6 +11,8 @@ import h5py
 import numpy as np
 import tqdm
 import multiprocessing as mp
+from util.analyze_datasets import dataset_filenames
+from util.fetch_datasets import load_embeds
 
 from caches.cache import (
     LFU,
@@ -31,22 +33,10 @@ from caches.cache import (
 from caches.arc import ARC
 from caches.cluster_lru import ClusterLRU
 from caches.lru_k import LRUK
-from caches.OPT import OPT, ClusterOPT, CoverOPT
+from caches.OPT import OPT, ClusterOPT, FGRVB
 from vector_stores.hnswlib_interface import HNSWVectorStore
 from vector_stores.milvus_interface import MilvusVectorStore
 from vector_stores.naive_interface import NaiveVectorStore
-
-dataset_filenames = {
-    "MsMarco": "datasets/embeds_msmarco.pkl",
-    "WildChat": "datasets/embeds_wildchat.pkl",
-    "ELI5": "datasets/embeds_eli5.pkl",
-    "NaturalQuestions": "datasets/embeds_nq.pkl",
-    "StackOverflow": "datasets/embeds_stackoverflow.pkl",
-    "Quora": "datasets/embeds_quora_qp.pkl",
-    "MMLU": "datasets/embeds_mmlu.pkl",
-    "TriviaQA": "datasets/embeds_triviaqa.pkl",
-    "HotPotQA": "datasets/embeds_hotpotqa.pkl",
-}
 
 
 def get_flat_index_faiss(dim: int = 384):
@@ -57,16 +47,6 @@ def yield_batch_slices(total_size, batch_size):
     for start in range(0, total_size, batch_size):
         stop = min(start + batch_size, total_size)
         yield slice(start, stop), list(range(start, stop))
-
-
-def load_embeds(dataset_name: str, N: int):
-    path = dataset_filenames[dataset_name]
-    with h5py.File(path, "r") as f:
-        embeds = f["normalized_embeds"][:N]
-        text_bytes = f["text"][:N]
-        embeds_texts = [t.decode("utf-8") for t in text_bytes]
-    embeds = np.array(embeds, dtype=np.float32)
-    return embeds, embeds_texts
 
 def get_hnsw_index_milvus(uri: str = "http://localhost:19530", dim: int = 384):
     id = f"vector{uuid.uuid4()}".replace("-", "_")
@@ -160,8 +140,8 @@ def _run_single_worker(args):
 
     caches = {
         "MissLFU": (MissLFU, same_embed_distance),
-        "NaiveRVB": (OPT, same_embed_distance, total_embeds),
-        "ClusterRVB": (ClusterOPT, same_embed_distance, total_embeds),
+        "RGRVB": (OPT, same_embed_distance, total_embeds),
+        "CRVB": (ClusterOPT, same_embed_distance, total_embeds),
         "SurprisalLFU": (SurprisalLFU, same_embed_distance),
         "Surprisal": (Surprisal, same_embed_distance),
         "SampleCache": (SamplingMetaCache, same_embed_distance, [LRU, LFU]),
@@ -178,7 +158,7 @@ def _run_single_worker(args):
         "DistanceLFU": (DistanceLFU, same_embed_distance),
         "RAP": (RAP, same_embed_distance),
         "SphereLFU": (SphereQueryLFU, same_embed_distance),
-        "CoverOPT": (CoverOPT, same_embed_distance, total_embeds)
+        "FGRVB": (FGRVB, same_embed_distance, total_embeds)
     }
     indices = {
         "milvus-lite": get_flat_index_milvus_lite,
@@ -310,14 +290,6 @@ class Processor:
                 output_path,
             ]
         )
-
-    def load_embeds(dataset_name: str, N: int):
-        path = dataset_filenames[dataset_name]
-        with open(path, "rb") as f:
-            data = pickle.load(f)
-        embeds_texts = data["text"][:N]
-        embeds = np.array(data["normalized_embeds"][:N], dtype=np.float32)
-        return embeds, embeds_texts
 
     def run(self) -> None:
         random.shuffle(self.submissions) # shuffle for a better estimation of runtime
