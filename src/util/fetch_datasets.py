@@ -1,5 +1,12 @@
-from itertools import chain
 import os
+
+import h5py
+
+# Increase timeout to 100 seconds (default is 10)
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0" # Disable fast transfer if enabled, sometimes causes issues
+os.environ["HF_HUB_ETAG_TIMEOUT"] = "100"
+os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "100"
+
 import pickle
 import numpy as np
 from typing import *
@@ -15,6 +22,27 @@ embeds_dir = "datasets"
 
 models: Dict[str, SentenceTransformer] = {}
 
+dataset_filenames = {
+    "MsMarco": "datasets/embeds_msmarco.pkl",
+    "WildChat": "datasets/embeds_wildchat.pkl",
+    "ELI5": "datasets/embeds_eli5.pkl",
+    "NaturalQuestions": "datasets/embeds_nq.pkl",
+    "StackOverflow": "datasets/embeds_stackoverflow.pkl",
+    "Quora": "datasets/embeds_quora_qp.pkl",
+    "MMLU": "datasets/embeds_mmlu.pkl",
+    "TriviaQA": "datasets/embeds_triviaqa.pkl",
+    "HotPotQA": "datasets/embeds_hotpotqa.pkl",
+}
+
+def load_embeds(dataset_name: str, N: int):
+    path = dataset_filenames[dataset_name]
+    with h5py.File(path, "r") as f:
+        embeds = f["normalized_embeds"][:N]
+        text_bytes = f["text"][:N]
+        embeds_texts = [t.decode("utf-8") for t in text_bytes]
+    embeds = np.array(embeds, dtype=np.float32)
+    return embeds, embeds_texts
+
 def embed_strings(strings: List[str], model_name: str = "all-MiniLM-L6-v2") -> np.ndarray:
     if model_name not in models:
         models[model_name] = SentenceTransformer(model_name)
@@ -28,7 +56,7 @@ def writer(path: str):
     if os.path.exists(path):
         f = None
     else:
-        f = NamedTemporaryFile(mode="wb", delete=False)
+        f = NamedTemporaryFile(mode="w+b", delete=False)
         tmp_path = f.name
     try:
         yield f
@@ -49,15 +77,15 @@ def pack_and_dump(path: str, texts: List[str], meta: Dict[str, List[Any]], model
         if f is None:
             print(f'Skipping "{path}" because it already exists')
             return
-        embeds = embed_strings(texts, model_name=model_name)
+        embeds = embed_strings(texts[:100000], model_name=model_name)
         normalized_embeds = normalize(embeds)
-        payload = {
-            "text": texts,
-            "normalized_embeds": normalized_embeds,
-            "embeds": embeds,
-            "meta": meta
-        }
-        pickle.dump(payload, f)
+        with h5py.File(f, "w") as hf:
+            hf.create_dataset("embeds", data=embeds)
+            hf.create_dataset("normalized_embeds", data=normalized_embeds)
+            dt = h5py.string_dtype(encoding='utf-8')
+            texts = [t.replace('\x00', '') for t in texts]
+            hf.create_dataset("text", data=texts, dtype=dt)
+    print(f"Saved HDF5 to {path}")
 
 def build_eli5() -> Tuple[List[str], Dict[str, List[Any]]]:
     ds = load_dataset("sentence-transformers/eli5", trust_remote_code=True)
@@ -129,6 +157,7 @@ def build_stackoverflow() -> Tuple[List[str], Dict[str, List[Any]]]:
     ds = load_dataset("pacovaldez/stackoverflow-questions")
     # Can also get the questions themselves
     texts = concatenate_datasets([ds[s] for s in ('train','validation','test')])['title']
+    meta = {}
     return texts, meta
 
 def build_quora() -> Tuple[List[str], Dict[str, List[Any]]]:
@@ -152,6 +181,47 @@ def build_quora() -> Tuple[List[str], Dict[str, List[Any]]]:
     }
     return texts, meta
 
+def build_mmlu() -> Tuple[List[str], Dict[str, List[Any]]]:
+    # MMLU (Massive Multitask Language Understanding)
+    # The 'all' config loads all subjects (STEM, humanities, etc.)
+    print("Loading MMLU (config: 'all')...")
+    ds = load_dataset("cais/mmlu", "all")
+        
+    texts = []
+    # Iterate over available splits (usually 'test', 'validation', 'dev', 'auxiliary_train')
+    for split in ds:
+        if "question" in ds[split].features:
+            texts.extend(ds[split]["question"])
+            
+    meta = {}
+    return texts, meta
+
+def build_hotpotqa() -> Tuple[List[str], Dict[str, List[Any]]]:
+    # HotpotQA (Multi-hop reasoning)
+    print("Loading HotpotQA...")
+    ds = load_dataset("hotpot_qa", "distractor")    
+    texts = []
+    # Splits: 'train', 'validation'
+    for split in ds:
+        texts.extend(ds[split]["question"])
+        
+    meta = {}
+    return texts, meta
+
+def build_triviaqa() -> Tuple[List[str], Dict[str, List[Any]]]:
+    # TriviaQA
+    # 'rc' (Reading Comprehension) is the standard configuration
+    print("Loading TriviaQA (config: 'rc')...")
+    ds = load_dataset("mandarjoshi/trivia_qa", "rc")
+    
+    texts = []
+    # Splits: 'train', 'validation', 'test'
+    for split in ds:
+        texts.extend(ds[split]["question"])
+        
+    meta = {}
+    return texts, meta
+
 def build_nq() -> Tuple[List[str], Dict[str, List[Any]]]:
     texts = []
     ds = load_dataset("nq_open")
@@ -173,28 +243,40 @@ def build_msmarco() -> Tuple[List[str], Dict[str, List[Any]]]:
 if __name__ == "__main__":
     os.makedirs(embeds_dir, exist_ok=True)
 
-    print("generating ELI5...") #V
-    texts, meta = build_eli5()
-    pack_and_dump(os.path.join(embeds_dir, "embeds_eli5.pkl"), texts, meta)
-
-    print("generating WildChat...") #V
-    texts, meta = build_wildchat()
-    pack_and_dump(os.path.join(embeds_dir, "embeds_wildchat.pkl"), texts, meta)
-
-    print("generating Natural Questions...") #V
-    texts, meta = build_nq()
-    pack_and_dump(os.path.join(embeds_dir, "embeds_nq.pkl"), texts, meta)
-
-    print("generating MS MARCO...") #V
-    texts, meta = build_msmarco()
-    pack_and_dump(os.path.join(embeds_dir, "embeds_msmarco.pkl"), texts, meta)
-
-    print("generating StackOverflow...") #V
+    print("generating StackOverflow...")
     texts, meta = build_stackoverflow()
     pack_and_dump(os.path.join(embeds_dir, "embeds_stackoverflow.pkl"), texts, meta)
 
-    print("generating Quora Question Pairs...") #V
+    print("generating Quora Question Pairs...")
     texts, meta = build_quora()
     pack_and_dump(os.path.join(embeds_dir, "embeds_quora_qp.pkl"), texts, meta)
 
+    print("generating WildChat...")
+    texts, meta = build_wildchat()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_wildchat.pkl"), texts, meta)
+
+    print("generating TriviaQA...")
+    texts, meta = build_triviaqa()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_triviaqa.pkl"), texts, meta)
+
+    print("generating HotpotQA...")
+    texts, meta = build_hotpotqa()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_hotpotqa.pkl"), texts, meta)
+    
+    print("generating MMLU...")
+    texts, meta = build_mmlu()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_mmlu.pkl"), texts, meta)
+    
+    print("generating ELI5...")
+    texts, meta = build_eli5()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_eli5.pkl"), texts, meta)
+
+    print("generating Natural Questions...")
+    texts, meta = build_nq()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_nq.pkl"), texts, meta)
+    
+    print("generating MS MARCO...")
+    texts, meta = build_msmarco()
+    pack_and_dump(os.path.join(embeds_dir, "embeds_msmarco.pkl"), texts, meta)
+    
     print("Done.")

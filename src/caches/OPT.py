@@ -1,3 +1,4 @@
+import math
 import sys
 sys.path.append("...")
 sys.path.append("..")
@@ -21,34 +22,43 @@ from sklearn.model_selection import TimeSeriesSplit
 from src.util.reduce_dim import cluster_by_coloring_dsat_faiss_heap, cluster_complete_linkage_faiss
 from vector_stores.naive_interface import NaiveVectorStore
 
+import numpy as np
+import faiss
+
 class OPT(Cache):
 
     def __init__(self, same_embed_distance, embeds):
         super().__init__(same_embed_distance)
-        self.embeds_covers = self.create_embeds_covers(embeds, same_embed_distance)
+        self.embeds = np.asarray(embeds, dtype=np.float32)
+        self.max_embed_id = len(embeds)
+        self.embeds_covers = self.create_embeds_covers(self.embeds, same_embed_distance)
+        self.curr_cover_counters = np.zeros(self.max_embed_id + 1, dtype=np.int32)
 
     def create_embeds_covers(self, embeds, same_embed_distance):
-        embeds = np.asarray(embeds, dtype=np.float32)
         n, d = embeds.shape
         index = faiss.IndexFlatL2(d)
         index.add(embeds)
         threshold = same_embed_distance ** 2
         lims, _, indices = index.range_search(embeds, threshold)
-        embeds_covers = []
+        
+        embeds_covers = np.empty(n, dtype=object)
         for i in range(n):
-            i_covers = np.sort(np.array([j for j in indices[lims[i]:lims[i + 1]] if j > i]))
-            embeds_covers.append(i_covers)
-        return np.array(embeds_covers, dtype=object)
+            i_covers = np.sort(indices[lims[i]:lims[i + 1]])
+            i_covers = i_covers[i_covers > i]
+            embeds_covers[i] = i_covers
+        return embeds_covers
 
     def initialize(self, capacity: int, index):
         self.items = {}
         self.curr_embed_id = 0
+        self.curr_cover_counters.fill(0)
         super().initialize(capacity, index)
     
     def get_next_hits(self, embeds_ids):
         curr_id = self.curr_embed_id
         next_hits = {}
-        for embed_id, row in zip(embeds_ids, self.embeds_covers[embeds_ids]):
+        batch_rows = self.embeds_covers[embeds_ids]        
+        for embed_id, row in zip(embeds_ids, batch_rows):
             i = row.searchsorted(curr_id, side='right')
             next_hit = np.inf
             if len(row) > 0 and len(row) > i:
@@ -59,119 +69,215 @@ class OPT(Cache):
     def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
+        
         evicted_items = []
         rejected_items = []
-        additions = []
+        additions_embeds = []
+        additions_ids = []
+        
         self.curr_embed_id = max(embeds_ids)
         
         stale_items = [eid for (eid, next_hit) in self.items.items() if next_hit <= self.curr_embed_id]
-        if len(stale_items) > 0:
+        if stale_items:
             self.items.update(self.get_next_hits(stale_items))
         
         embeds_next_hits = self.get_next_hits(embeds_ids)
+        
         for embed, embed_id in zip(embeds, embeds_ids):
             embed_next_hit = embeds_next_hits[embed_id] 
+            if math.isinf(embed_next_hit):
+                rejected_items.append(embed_id)
+                continue
             max_next_hit_embed_id = max(self.items, key=self.items.get, default=None)
             max_next_hit = self.items.get(max_next_hit_embed_id, float('inf'))
-            covered_hits = set().union(*(self.embeds_covers[i] for i in self.items))
-            if self.capacity > self.size() or (embed_next_hit < max_next_hit and embed_next_hit not in covered_hits):
+            is_covered = self.curr_cover_counters[embed_next_hit] > 0
+            if self.capacity > self.size() or (embed_next_hit < max_next_hit and not is_covered):
                 if self.capacity <= self.size():
                     evicted_items.append(max_next_hit_embed_id)
                     self.items.pop(max_next_hit_embed_id)
+                    evicted_covers = self.embeds_covers[max_next_hit_embed_id]
+                    self.curr_cover_counters[evicted_covers] -= 1
                 self.items[embed_id] = embed_next_hit
-                additions.append((embed_id, embed))
+                new_covers = self.embeds_covers[embed_id]
+                self.curr_cover_counters[new_covers] += 1
+                additions_embeds.append(embed)
+                additions_ids.append(embed_id)
             else: 
                 rejected_items.append(embed_id)
-        if additions:
-            additions_embeds = [v for (_, v) in additions]
-            additions_ids = [v for (v, _) in additions]
+        if additions_ids:
             self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         if evicted_items:
             self.remove_ids(np.array(evicted_items))
+            
         return cache_hits, evicted_items + rejected_items
-
-
-class CoverOPT(Cache):
+class FGRVB(Cache):
 
     def __init__(self, same_embed_distance, embeds):
         super().__init__(same_embed_distance)
-        self.embeds_covers = self.create_embeds_covers(embeds, same_embed_distance)
+        # Pre-convert to float32 once to avoid repeated casting
+        self.embeds = np.asarray(embeds, dtype=np.float32)
+        self.embeds_covers = self.create_embeds_covers(self.embeds, same_embed_distance)
+        
+        # Pre-allocate generic range for bincounts to avoid dynamic resizing if possible
+        self.max_embed_id = len(embeds) 
 
     def create_embeds_covers(self, embeds, same_embed_distance):
-        embeds = np.asarray(embeds, dtype=np.float32)
         n, d = embeds.shape
         index = faiss.IndexFlatL2(d)
         index.add(embeds)
+        
         threshold = same_embed_distance ** 2
         lims, _, indices = index.range_search(embeds, threshold)
-        embeds_covers = []
+        
+        embeds_covers = np.empty(n, dtype=object)
+        
+        # Optimize loop: Remove list comprehension, use numpy masking
         for i in range(n):
-            i_covers = np.sort(np.array([j for j in indices[lims[i]:lims[i + 1]] if j > i]))
-            embeds_covers.append(i_covers)
-        return np.array(embeds_covers, dtype=object)
+            start, end = lims[i], lims[i + 1]
+            neighbors = indices[start:end]
+            
+            # Vectorized filtering for forward-looking covers only (j > i)
+            # We sort strictly to allow searchsorted later
+            future_neighbors = np.sort(neighbors[neighbors > i])
+            embeds_covers[i] = future_neighbors
+            
+        return embeds_covers
 
     def initialize(self, capacity: int, index):
         self.items = {}
         self.curr_embed_id = 0
         super().initialize(capacity, index)
-    
-    def get_covers(self, embeds_ids):
-        curr_id = self.curr_embed_id
-        next_hits = {}
-        for embed_id, row in zip(embeds_ids, self.embeds_covers[embeds_ids]):
-            i = row.searchsorted(curr_id, side='right')
-            next_hit = []
-            if len(row) > 0 and len(row) > i:
-                next_hit = row[i:]
-            next_hits[embed_id] = next_hit
-        return next_hits
-    
-    def select_replacement(self, cand_id):
-        evict_id = cand_id
-        max_score = 0
-        stored_embeds_ids = list(self.items.keys())
-        all_embed_ids = stored_embeds_ids + [cand_id]
-        covers = self.get_covers(all_embed_ids)
-        for embed_id in all_embed_ids:
-            embed_covers = covers.pop(embed_id)
-            vv = set()
-            vv.update(*covers.values())
-            embed_score = len(vv)
-            if embed_score > max_score:
-                evict_id = embed_id
-                max_score = embed_score
-            covers[embed_id] = embed_covers
-        return evict_id
+
+    def select_replacement_optimized(self, cand_id):
+        """
+        Algorithmic Optimization:
+        Instead of calculating Union(All \ {x}) for every x (Quadratic complexity),
+        we calculate global frequency counts.
+        
+        An item should be kept if it covers queries that NO ONE ELSE covers.
+        We look for items that have the fewest "unique covers".
+        """
+        # 1. Gather keys: current cache + candidate
+        # Converting keys to list is faster than separate key/value extraction
+        active_ids = list(self.items.keys())
+        active_ids.append(cand_id)
+        
+        # 2. Collect all valid future hits (covers) for these items
+        # We process only valid covers > curr_embed_id
+        valid_covers_map = {}
+        all_future_hits = []
+        
+        curr = self.curr_embed_id
+        
+        # Batch collect future hits
+        for eid in active_ids:
+            # Get pre-computed covers
+            covers = self.embeds_covers[eid]
             
-    
+            # Find subset of covers that are in the future
+            # searchsorted is O(log N), much faster than checking all
+            start_idx = covers.searchsorted(curr, side='right')
+            
+            if start_idx < len(covers):
+                future = covers[start_idx:]
+                valid_covers_map[eid] = future
+                all_future_hits.append(future)
+            else:
+                # If an item has no future covers, it is the perfect eviction candidate.
+                # Return immediately to save computation.
+                return eid
+
+        # 3. Flatten and Count Frequencies
+        if not all_future_hits:
+            return cand_id # No future hits for anyone, arbitrary eviction
+            
+        flat_hits = np.concatenate(all_future_hits)
+        
+        # bincount is extremely fast for integer counting
+        # We need size=max_id+1. We can infer max from data or use self.max_embed_id
+        counts = np.bincount(flat_hits, minlength=self.max_embed_id)
+        
+        # 4. Identify "Critical Hits" (Hits covered by exactly one cached item)
+        # A hit is critical if count == 1.
+        # We use a boolean mask where Index K is True if query K is covered by only 1 item.
+        is_critical = (counts == 1)
+
+        # 5. Score candidates
+        # Score = How many critical hits does this candidate provide?
+        # We want to EVICT the item with the LOWEST score (least unique contribution).
+        min_score = float('inf')
+        evict_id = cand_id
+        
+        for eid in active_ids:
+            if eid not in valid_covers_map:
+                return eid # Score is 0
+            
+            # Sum the boolean mask for this item's covers
+            # This counts how many of this item's covers are 'critical'
+            item_covers = valid_covers_map[eid]
+            score = np.sum(is_critical[item_covers])
+            
+            if score < min_score:
+                min_score = score
+                evict_id = eid
+                # Optimization: Can't get lower than 0
+                if min_score == 0:
+                    return evict_id
+                    
+        return evict_id
+
     def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        # 1. Batch calculations for hits
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
-        cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
+        # Assuming get_closest_stored_embeds returns (n_samples, n_neighbors)
+        # We check if ANY neighbor is within distance
+        has_hit = np.any(closest_dists < self.same_embed_distance, axis=1)
+        cache_hits = np.sum(has_hit)
+
         evicted_items = []
         rejected_items = []
-        additions = []
-        self.curr_embed_id = max(embeds_ids)
-        for embed, embed_id in zip(embeds, embeds_ids):
-            if self.capacity > self.size():
+        additions_embeds = []
+        additions_ids = []
+
+        # Update current time reference
+        max_id = np.max(embeds_ids)
+        self.curr_embed_id = max_id
+
+        # 2. Process cache updates
+        # We must process sequentially because cache state changes influence decisions
+        for i, (embed, embed_id) in enumerate(zip(embeds, embeds_ids)):
+            
+            # If it's a hit, we technically don't need to do anything for LFU/OPT 
+            # unless we need to refresh LRU positions (not needed here).
+            # However, logic implies we insert only if space or better candidate exists.
+            
+            if embed_id in self.items:
+                continue # Already in cache
+
+            if len(self.items) < self.capacity:
                 self.items[embed_id] = 1
-                additions.append((embed_id, embed))
+                additions_embeds.append(embed)
+                additions_ids.append(embed_id)
             else:
-                evict_id = self.select_replacement(embed_id)
+                # Use the optimized selector
+                evict_id = self.select_replacement_optimized(embed_id)
+                
                 if evict_id == embed_id:
                     rejected_items.append(embed_id)
                 else:
-                    evicted_items.append(evict_id)
                     self.items.pop(evict_id)
+                    evicted_items.append(evict_id)
                     self.items[embed_id] = 1
-                    additions.append((embed_id, embed))
-        if additions:
-            additions_embeds = [v for (_, v) in additions]
-            additions_ids = [v for (v, _) in additions]
+                    additions_embeds.append(embed)
+                    additions_ids.append(embed_id)
+
+        # 3. Batch updates to the index
+        if additions_ids:
             self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
         if evicted_items:
             self.remove_ids(np.array(evicted_items))
-        return cache_hits, evicted_items + rejected_items
 
+        return cache_hits, evicted_items + rejected_items
 class ClusterRelaxedOPT(Cache):
     def __init__(self, same_embed_distance, embeds, belady_boundary_coe=2.0):
         super().__init__(same_embed_distance)
@@ -197,10 +303,10 @@ class ClusterRelaxedOPT(Cache):
         super().initialize(capacity, index)
 
     def get_next_hits(self, embeds_ids):
-        embeds_clusters_ids = self.embeds_clusters[embeds_ids]
         curr_id = self.curr_embed_id
         next_hits = {}
-        for embed_id, row in zip(embeds_ids, self.embeds_covers[embeds_clusters_ids]):
+        batch_rows = self.embeds_covers[embeds_ids]        
+        for embed_id, row in zip(embeds_ids, batch_rows):
             i = row.searchsorted(curr_id, side='right')
             next_hit = np.inf
             if len(row) > 0 and len(row) > i:
@@ -258,99 +364,127 @@ class ClusterRelaxedOPT(Cache):
 class ClusterOPT(Cache):
     def __init__(self, same_embed_distance, embeds):
         super().__init__(same_embed_distance)
-        self.embeds_covers, self.embeds_clusters, self.clusters_embeds = self.create_embeds_covers(embeds, same_embed_distance)
+        self.embeds = np.asarray(embeds, dtype=np.float32)
+        self.max_embed_id = len(embeds)
+        self.curr_cover_counters = np.zeros(self.max_embed_id + 1, dtype=np.int32)
+        self.embeds_covers, self.embeds_clusters, self.clusters_embeds = self.create_embeds_covers(self.embeds, same_embed_distance)
 
     def create_embeds_covers(self, embeds, same_embed_distance):
-        embeds = np.asarray(embeds, dtype=np.float32)
         n, d = embeds.shape
         index = faiss.IndexFlatL2(d)
         index.add(embeds)
         threshold = same_embed_distance ** 2
         lims, _, indices = index.range_search(embeds, threshold)
-        embeds_covers = []
+        embeds_covers = np.empty(n, dtype=object)
         for i in range(n):
-            i_covers = np.sort(np.array([j for j in indices[lims[i]:lims[i + 1]] if j > i]))
-            embeds_covers.append(i_covers)
-        embeds_covers = np.array(embeds_covers, dtype=object)
-        
+            neighbors = indices[lims[i]:lims[i + 1]]
+            future_neighbors = np.sort(neighbors[neighbors > i])
+            embeds_covers[i] = future_neighbors
         embeds_clusters = cluster_complete_linkage_faiss(embeds, same_embed_distance)
         clusters_embeds = {}
-        # embeds_clusters lists are implicitly sorted due to the enumeration 
         for i, v in enumerate(embeds_clusters):
             clusters_embeds.setdefault(v, []).append(i)
         
-        return np.array(embeds_covers, dtype=object), embeds_clusters, clusters_embeds
+        return embeds_covers, embeds_clusters, clusters_embeds
 
     def initialize(self, capacity: int, index):
         self.items = {}
         self.curr_embed_id = 0
+        # Reset counters
+        self.curr_cover_counters.fill(0)
         super().initialize(capacity, index)
-    
+
+    def _update_counters_vectorized(self, ids, increment=True):
+        if len(ids) == 0:
+            return
+        
+        # Extract all relevant cover arrays at once
+        selected_covers = self.embeds_covers[ids]
+        
+        if len(selected_covers) > 0:
+            flat_indices = np.concatenate(selected_covers)
+            if flat_indices.size > 0:
+                val = 1 if increment else -1
+                np.add.at(self.curr_cover_counters, flat_indices, val)
+
     def get_cluster_next_hits(self, embeds_ids):
         curr_id = self.curr_embed_id
         clusters_ids = self.embeds_clusters[embeds_ids]
         next_hits = {}
         for embed_id, cluster_id in zip(embeds_ids, clusters_ids):
             row = self.clusters_embeds[cluster_id]
-            i = np.searchsorted(row, curr_id, side='right')
-            next_hit = np.inf
-            if len(row) > 0 and len(row) > i:
-                next_hit = row[i]
-            next_hits[embed_id] = next_hit
+            idx = np.searchsorted(row, curr_id, side='right')
+            if idx < len(row):
+                next_hits[embed_id] = row[idx]
+            else:
+                next_hits[embed_id] = np.inf
         return next_hits
     
     def get_next_hits(self, embeds_ids):
         curr_id = self.curr_embed_id
         next_hits = {}
-        for embed_id, row in zip(embeds_ids, self.embeds_covers[embeds_ids]):
+        batch_rows = self.embeds_covers[embeds_ids]        
+        for embed_id, row in zip(embeds_ids, batch_rows):
             i = row.searchsorted(curr_id, side='right')
-            next_hit = np.inf
-            if len(row) > 0 and len(row) > i:
-                next_hit = row[i]
-            next_hits[embed_id] = next_hit
+            if i < len(row):
+                next_hits[embed_id] = row[i]
+            else:
+                next_hits[embed_id] = np.inf
         return next_hits
 
     def get_combined_next_hits(self, embeds_ids):
         next_hits = self.get_next_hits(embeds_ids)
         cluster_next_hits = self.get_cluster_next_hits(embeds_ids)
-        combined_hits = {eid: (cluster_next_hits[eid], next_hits[eid]) for eid in embeds_ids}
-        return combined_hits
+        return {eid: (cluster_next_hits[eid], next_hits[eid]) for eid in embeds_ids}
     
-    # reject items from covered clusters (if possible?)
-    # when evicting, evict entry with furthest next hit for cluster with furthest next hit (should just be )    
     def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
         closest_dists, _ = self.get_closest_stored_embeds(embeds, count_nn)
         cache_hits = np.sum(closest_dists < self.same_embed_distance, axis=1)
+        
         evicted_items = []
         rejected_items = []
-        additions = []
+        additions_embeds = []
+        additions_ids = []
+        
         self.curr_embed_id = max(embeds_ids)
         
-        stale_items = [eid for (eid, (cluster_next_hit, next_hit)) in self.items.items() if next_hit <= self.curr_embed_id]
-        if len(stale_items) > 0:
+        stale_items = [eid for (eid, (_, next_hit)) in self.items.items() if next_hit <= self.curr_embed_id]
+        if stale_items:
             self.items.update(self.get_combined_next_hits(stale_items))
         
         embeds_next_hits = self.get_combined_next_hits(embeds_ids)
         for embed, embed_id in zip(embeds, embeds_ids):
-            embed_next_hit = embeds_next_hits[embed_id] 
+            embed_next_hit_tuple = embeds_next_hits[embed_id] 
             max_next_hit_embed_id = max(self.items, key=self.items.get, default=None)
-            max_next_hit = self.items.get(max_next_hit_embed_id, (float('inf'), float('inf')))
-            covered_hits = set().union(*(self.embeds_covers[i] for i in self.items))
-            embed_next_hit_is_covered = embed_next_hit in covered_hits
-            if self.capacity > self.size() or (not embed_next_hit_is_covered and embed_next_hit <= max_next_hit):
+            max_next_hit_tuple = self.items.get(max_next_hit_embed_id, (float('inf'), float('inf')))
+            target_hit = embed_next_hit_tuple[1]
+            is_covered = False
+            if target_hit != np.inf and target_hit < len(self.curr_cover_counters):
+                is_covered = self.curr_cover_counters[int(target_hit)] > 0
+            # Logic: Cache if we have space OR (Item is unique AND needed sooner than victim)
+            should_cache = False
+            if self.capacity > self.size():
+                should_cache = True
+            elif (not is_covered) and (embed_next_hit_tuple <= max_next_hit_tuple):
+                should_cache = True
+            if should_cache:
                 if self.capacity <= self.size():
                     evicted_items.append(max_next_hit_embed_id)
                     self.items.pop(max_next_hit_embed_id)
-                self.items[embed_id] = embed_next_hit
-                additions.append((embed_id, embed))
+                self.items[embed_id] = embed_next_hit_tuple
+                additions_embeds.append(embed)
+                additions_ids.append(embed_id)
             else: 
                 rejected_items.append(embed_id)
-        if additions:
-            additions_embeds = [v for (_, v) in additions]
-            additions_ids = [v for (v, _) in additions]
+
+        if additions_ids:
             self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+            self._update_counters_vectorized(additions_ids, increment=True)
+            
         if evicted_items:
             self.remove_ids(np.array(evicted_items))
+            self._update_counters_vectorized(evicted_items, increment=False)
+            
         return cache_hits, evicted_items + rejected_items
 
 class RelaxedOPT(Cache):
@@ -385,7 +519,8 @@ class RelaxedOPT(Cache):
     def get_next_hits(self, embeds_ids):
         curr_id = self.curr_embed_id
         next_hits = {}
-        for embed_id, row in zip(embeds_ids, self.embeds_covers[embeds_ids]):
+        batch_rows = self.embeds_covers[embeds_ids]        
+        for embed_id, row in zip(embeds_ids, batch_rows):
             i = row.searchsorted(curr_id, side='right')
             next_hit = np.inf
             if len(row) > 0 and len(row) > i:

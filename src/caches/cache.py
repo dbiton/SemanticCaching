@@ -22,6 +22,9 @@ class Cache:
         self.capacity = capacity
         self.index = index
 
+    def update_metadata(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        raise NotImplementedError("virtual method")
+
     def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
         raise NotImplementedError("virtual method")
 
@@ -389,6 +392,129 @@ class Surprisal(SimpleCache):
         return -calculate_surprisal(embed_text)
     
 class SphereQueryLFU(Cache):
+    def __init__(self, same_embed_distance):
+        super().__init__(same_embed_distance)
+
+    def initialize(self, capacity: int, index):
+        # Use a dict mapping embed_id -> frequency (access count)
+        self.items = {}
+        self.halve_counter = 0
+        super().initialize(capacity, index)
+    
+    def update_counters(self, distances, embeds_ids):
+        """
+        distances  : list / 1D array of L2 distances for hits of ONE query
+        embeds_ids : list of embed_ids corresponding to distances
+
+        Side effect:
+            Updates self.items[eid] by adding posterior responsibility
+
+        returns:
+            np.ndarray of counter increments (same length), summing to 1
+        """
+        d = np.asarray(distances, dtype=np.float64)
+        ids = np.asarray(embeds_ids)
+
+        assert len(d) == len(ids), "distances and embeds_ids must align"
+
+        K = len(d)
+        if K == 0:
+            return
+
+        # --- hyperparameters ---
+        alpha = getattr(self, "alpha", 1e-3)
+
+        # Ensure kappa exists (derived from semantic threshold)
+        if not hasattr(self, "kappa") or self.kappa is None:
+            D = float(getattr(self, "same_embed_distance", 1.0))
+            eps = float(getattr(self, "eps_at_threshold", 0.1))
+            self.kappa = 2.0 * np.log(1.0 / eps) / (D * D)
+
+        # --- prior from current counters ---
+        counts = np.array(
+            [self.items.get(eid, 0.0) for eid in ids],
+            dtype=np.float64
+        )
+        prior = counts + alpha
+
+        # --- likelihood from distances ---
+        log_likelihood = -0.5 * self.kappa * (d ** 2)
+
+        # --- unnormalized log posterior ---
+        logw = np.log(prior) + log_likelihood
+
+        # --- numerical stabilization ---
+        m = np.max(logw)
+        w = np.exp(logw - m)
+        s = w.sum()
+
+        if not np.isfinite(s) or s <= 0.0:
+            # fallback: uniform responsibility
+            r = np.full(K, 1.0 / K, dtype=np.float64)
+        else:
+            r = w / s
+
+        # --- UPDATE COUNTERS ---
+        for eid, ri in zip(ids, r):
+            self.items[eid] = self.items.get(eid, 0.0) + float(ri)
+
+        return r
+    
+    def halve_counters(self):
+        self.halve_counter = 0
+        for eid in self.items:
+            self.items[eid] *= 0.5
+    
+    def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        closest_dists, closest_ids = self.get_in_range_stored_embeds(embeds, self.same_embed_distance)
+        mask = closest_dists < self.same_embed_distance
+        cache_hits_indices = np.where(mask)
+        cache_hits = np.count_nonzero(mask, axis=1)
+        evicted_items = []
+        additions_embeds = []
+        additions_ids = []
+        insert_candidates_indices = []
+        for i_embed, embed_id in enumerate(embeds_ids):
+            hits = closest_ids[i_embed]
+            if len(hits) == 0:
+                insert_candidates_indices.append(i_embed)
+            else:
+                self.halve_counter += 1
+                distances = closest_dists[i_embed]
+                self.update_counters(distances, hits)
+        
+        if self.halve_counter >= self.capacity:
+            self.halve_counters()
+        
+        max_needed_space = len(insert_candidates_indices)
+        current_size = self.size()
+        max_count_remove = max(0, (current_size + max_needed_space) - self.capacity)
+        if max_count_remove > 0:
+            least_used = heapq.nsmallest(max_count_remove, self.items.items(), key=lambda x: x[1])
+            for _ in range(max_count_remove):
+                evict_cand_id, evict_cand_counter = least_used[0]
+                probability_evict = 1 / (evict_cand_counter + 1)
+                # always evict because seems to work better for my use case!
+                if True:
+                #if random.random() < probability_evict:
+                    least_used.pop(0)
+                    del self.items[evict_cand_id]
+                    evicted_items.append(evict_cand_id)
+        for i_embed in insert_candidates_indices:
+            if self.size() >= self.capacity:
+                break
+            embed = embeds[i_embed]
+            embed_id = embeds_ids[i_embed]
+            self.items[embed_id] = 1
+            additions_embeds.append(embed)
+            additions_ids.append(embed_id)
+        if evicted_items:
+            self.remove_ids(np.array(evicted_items))
+        if additions_ids:
+            self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
+        return cache_hits, evicted_items
+
+class SphereDistanceQueryLFU(Cache):
     def __init__(self, same_embed_distance):
         super().__init__(same_embed_distance)
 
@@ -868,3 +994,233 @@ class TinyLFU(Cache):
             self.add_with_ids(np.array(additions_embeds), np.array(additions_ids))
 
         return cache_hits, removals
+
+
+class SamplingMetaCache(Cache):
+    def __init__(
+        self,
+        same_embed_distance: float,
+        base_policies: list,
+        sample_cache_ratio: float = 0.25,
+        sample_prob: float = 1.0,
+        min_sample_queries: int = 1000,
+        switch_interval: int = 10000,
+    ):
+        """
+        :param base_policies: list of Cache subclasses (e.g. [LRU, LFU, TinyLFU]).
+                              These must have the same constructor signature as your
+                              existing policies: cls(same_embed_distance).
+        :param sample_cache_ratio: capacity of each shadow cache as a fraction
+                                   of the main capacity (e.g. 0.25 -> 25%).
+        :param sample_prob: probability that a given request is sent to a given
+                            shadow cache (request sampling).
+                            1.0 means all requests.
+        :param min_sample_queries: minimal number of sampled queries per policy
+                                   before we consider switching the active policy.
+        :param switch_interval: number of *real* queries between possible switches.
+        """
+        super().__init__(same_embed_distance)
+        assert 0.0 < sample_cache_ratio <= 1.0
+        assert 0.0 < sample_prob <= 1.0
+
+        self.base_policies = base_policies
+        self.sample_cache_ratio = sample_cache_ratio
+        self.sample_prob = sample_prob
+        self.min_sample_queries = min_sample_queries
+        self.switch_interval = switch_interval
+
+        # Runtime state
+        self.active_policy = None        # the production cache
+        self.shadow_policies = []        # small sampled caches
+        self.policy_names = [cls.__name__ for cls in base_policies]
+        self.policy_stats = []           # list of dicts: {hits, queries}
+        self.total_hits = 0
+        self.total_queries = 0
+        self.global_queries = 0
+
+    def initialize(self, capacity: int, index):
+        # We keep these for compatibility, but most logic is delegated.
+        self.capacity = capacity
+        self.index = index
+
+        # 1) Active (production) policy: start with the first policy in the list.
+        active_cls = self.base_policies[0]
+        self.active_policy = active_cls(self.same_embed_distance)
+        self.active_policy.initialize(capacity, index)
+        self.items = self.active_policy.items
+        
+        # 2) Shadow policies: smaller independent caches + indices.
+        self.shadow_policies = []
+        self.policy_stats = []
+        dim = index.dim  # FAISS dimension
+
+        shadow_capacity = max(1, int(capacity * self.sample_cache_ratio))
+
+        for cls in self.base_policies:
+            shadow_index = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
+            policy = cls(self.same_embed_distance)
+            policy.initialize(shadow_capacity, shadow_index)
+            self.shadow_policies.append(policy)
+            self.policy_stats.append({"hits": 0, "queries": 0})
+
+        # Reset stats
+        self.total_hits = 0
+        self.total_queries = 0
+        self.global_queries = 0
+
+    def size(self):
+        if self.active_policy is None:
+            return 0
+        return self.active_policy.size()
+
+    def get_policy_stats(self):
+        result = {}
+        for name, stats in zip(self.policy_names, self.policy_stats):
+            q = stats["queries"]
+            hr = (stats["hits"] / q) if q > 0 else 0.0
+            result[name] = {
+                "hits": stats["hits"],
+                "queries": q,
+                "hit_rate": hr,
+            }
+        return result
+
+    def get_best_policy(self):
+        stats = self.get_policy_stats()
+        if not stats:
+            return None, None
+        best_name = None
+        best_hr = -1.0
+        for name, info in stats.items():
+            if info["queries"] == 0:
+                continue
+            if info["hit_rate"] > best_hr:
+                best_hr = info["hit_rate"]
+                best_name = name
+        if best_name is None:
+            return None, None
+        return best_name, stats[best_name]
+
+    def get_overall_hit_rate(self):
+        if self.total_queries == 0:
+            return 0.0
+        return self.total_hits / self.total_queries
+
+    # ---------- Internal: switching active policy ----------
+
+    def _maybe_switch_active_policy(self):
+        """
+        Optionally switch the active policy to the best-performing one.
+        This is called periodically from cache().
+
+        NOTE: For simplicity, when switching policies we FLUSH the real cache:
+              - we reset the FAISS index
+              - we reinitialize the new active policy as empty
+
+        This keeps metadata consistent at the cost of losing current contents.
+        """
+        # Only consider switching every 'switch_interval' queries.
+        if self.global_queries == 0:
+            return
+        if self.global_queries % self.switch_interval != 0:
+            return
+
+        # Require each policy to have seen at least min_sample_queries.
+        for s in self.policy_stats:
+            if s["queries"] < self.min_sample_queries:
+                return
+
+        # Choose best by hit-rate.
+        best_name, best_info = self.get_best_policy()
+        if best_name is None:
+            return
+
+        # If current active policy already matches best, do nothing.
+        if type(self.active_policy).__name__ == best_name:
+            return
+
+        # Find class for best policy.
+        best_cls = None
+        for cls in self.base_policies:
+            if cls.__name__ == best_name:
+                best_cls = cls
+                break
+        if best_cls is None:
+            return  # shouldn't happen
+
+        # Flush real cache and reinitialize it with the best class.
+        # We reset the FAISS index; content is lost but consistency is preserved.
+        if self.index is not None:
+            self.remove_ids(list(self.items))
+
+        new_policy = best_cls(self.same_embed_distance)
+        new_policy.initialize(self.capacity, self.index)
+        self.active_policy = new_policy
+        self.items = self.active_policy.items
+
+        # We DO NOT reset policy_stats here; they continue accumulating.
+
+    # ---------- Main API ----------
+
+    def cache(self, embeds, embeds_ids, count_nn=1, texts=[]):
+        """
+        - Sends a sampled subset of the request batch to each shadow policy,
+          and updates their hit-rate stats.
+        - Applies the request batch to the active (production) cache.
+        - Returns (cache_hits, evicted_items) from the active cache.
+        """
+        if self.active_policy is None:
+            raise RuntimeError("SamplingMetaCache must be initialized before use.")
+
+        embeds = np.asarray(embeds)
+        embeds_ids = np.asarray(embeds_ids)
+
+        batch_size = len(embeds)
+        self.global_queries += batch_size
+
+        # ---- 1) Sampling to shadow policies ----
+        for idx, policy in enumerate(self.shadow_policies):
+            # Decide which requests go to this shadow policy.
+            if self.sample_prob >= 1.0:
+                mask = np.ones(batch_size, dtype=bool)
+            else:
+                mask = np.random.rand(batch_size) < self.sample_prob
+
+            if not mask.any():
+                continue
+
+            sampled_embeds = embeds[mask]
+            sampled_ids = embeds_ids[mask]
+
+            if texts:
+                sampled_texts = [t for t, m in zip(texts, mask) if m]
+            else:
+                sampled_texts = []
+
+            hits_shadow, _ = policy.cache(
+                sampled_embeds,
+                sampled_ids,
+                count_nn=count_nn,
+                texts=sampled_texts,
+            )
+
+            hits_sum = int(np.sum(hits_shadow))
+            queries_count = len(sampled_embeds)
+            self.policy_stats[idx]["hits"] += hits_sum
+            self.policy_stats[idx]["queries"] += queries_count
+
+        # ---- 2) Active (production) cache ----
+        hits_prod, evicted_prod = self.active_policy.cache(
+            embeds,
+            embeds_ids,
+            count_nn=count_nn,
+            texts=texts,
+        )
+
+        self.total_hits += int(np.sum(hits_prod))
+        self.total_queries += batch_size
+
+        # ---- 3) Possibly switch the active policy ----
+        self._maybe_switch_active_policy()
+
+        return hits_prod, evicted_prod
