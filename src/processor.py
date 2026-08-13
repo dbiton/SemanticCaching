@@ -151,7 +151,7 @@ def _run_single_worker(args):
         "LFU": (LFU, same_embed_distance),
         "LRU": (LRU, same_embed_distance),
         "LRUK": (LRUK, same_embed_distance, 2),
-        "DALFU": (DynamicAgingLFU, same_embed_distance, 32),
+        "LFUDA": (DynamicAgingLFU, same_embed_distance, 32),
         "ARC": (ARC, same_embed_distance),
         "ClusterLRU": (ClusterLRU, same_embed_distance),
         "ClusterLFU": (ClusterLFU, same_embed_distance),

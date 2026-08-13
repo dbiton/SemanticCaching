@@ -17,7 +17,7 @@ from util.analyze_datasets import dataset_filenames
 # use only text, embeds - remove normalized embeds
 
 
-NUM_PROCS = 10
+NUM_PROCS = 8
 
 
 # --- 1. CONFIGURATION FOR OVERLEAF READABILITY ---
@@ -42,11 +42,11 @@ plt.rcParams.update({
 def plot():
     df = []
     # Safety check for file existence
-    if not os.path.exists("results.json"):
+    if not os.path.exists("results_many.json"):
         print("results.json not found.")
         return
 
-    with open("results.json", "r") as f:
+    with open("results_many.json", "r") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -60,7 +60,7 @@ def plot():
     
     # Columns to EXCLUDE from plotting (metadata)
     ignore_cols = ["Dataset", "Cache Name", "Cache Size"] 
-    ignore_policies = ["RR"]
+    ignore_policies = ["RR", "MissLFU", "LIFO"]
 
     # --- 2. CALCULATE GLOBAL LIMITS ---
     # To ensure axis starts at the same point, we need the global min/max
@@ -72,66 +72,73 @@ def plot():
     
     count_colors = len(set(df["Cache Name"]))
     # Using 'tab10' or 'Set1' is often more distinct than 'tab20' for lines
-    colors = sns.color_palette("tab10", n_colors=max(count_colors, 1))
+    colors = sns.color_palette("tab20", n_colors=max(count_colors, 1))
 
     # We need to collect handles/labels for the legend only once roughly
     legend_handles = []
     legend_labels = []
 
-    for dataset_name in set(df['Dataset']):
-        df_dataset = df[(df["Dataset"] == dataset_name)]
-        
-        # Iterate over columns, but skip metadata
-        for prop_name in df.columns:
-            if prop_name in ignore_cols:
-                continue
-
-            plt.figure()
+    distance_miss = 2
+    df['Normalized Mean Hit Distance'] = df['Hit Rate'] * df['Mean Hit Distance'] + (1 - df['Hit Rate']) * distance_miss
+    df['F1'] = df['Hit Rate'] * (2 - df['Mean Hit Distance']) / (2 + df['Hit Rate'] - df['Mean Hit Distance'])
+    
+    
+    for threshold in set(df["Same Embed Distance"]):
+        for dataset_name in set(df['Dataset']):
+            df_dataset = df[(df["Dataset"] == dataset_name) & (df["Same Embed Distance"] == threshold)]
             
-            # Reset handles for this specific plot (though we create a separate legend file later)
-            i = 0
-            sorted_caches = sorted(list(set(df_dataset["Cache Name"])))
-            
-            for cache_name in sorted_caches:
-                if cache_name in ignore_policies:
-                    continue
-                
-                df_cache = df_dataset[df_dataset["Cache Name"] == cache_name].sort_values("Cache Size")
-                
-                cache_size = df_cache["Cache Size"].to_list()
-                prop_values = df_cache[prop_name].to_list()
-                
-                # Check if data exists
-                if not cache_size:
+            # Iterate over columns, but skip metadata
+            for prop_name in df.columns:
+                if prop_name in ignore_cols:
                     continue
 
-                h, = plt.plot(
-                    cache_size,
-                    prop_values,
-                    label=cache_name,
-                    marker=markers[i % len(markers)],
-                    color=colors[i % len(colors)],
-                )
+                plt.figure()
                 
-                # Capture for the global legend file (only need to do this once effectively)
-                if cache_name not in legend_labels:
-                    legend_handles.append(h)
-                    legend_labels.append(cache_name)
+                # Reset handles for this specific plot (though we create a separate legend file later)
+                i = 0
+                sorted_caches = sorted(list(set(df_dataset["Cache Name"])))
                 
-                i += 1
+                for cache_name in sorted_caches:
+                    if cache_name in ignore_policies:
+                        continue
+                    
+                    df_cache = df_dataset[df_dataset["Cache Name"] == cache_name].sort_values("Cache Size")
+                    
+                    cache_size = df_cache["Cache Size"].to_list()
+                    prop_values = df_cache[prop_name].to_list()
+                    
+                    # Check if data exists
+                    if not cache_size:
+                        continue
 
-            # --- 3. AXIS SCALING & LABELING ---
-            #plt.xlabel("Cache Size")
-            #plt.ylabel(prop_name)
-            
-            plt.yscale("log")
-            
-            # Force the axis to start/end at the same points for all plots
-            plt.xlim(global_min_x, global_max_x)
+                    h, = plt.plot(
+                        cache_size,
+                        prop_values,
+                        label=cache_name,
+                        marker=markers[i % len(markers)],
+                        color=colors[i % len(colors)],
+                    )
+                    
+                    # Capture for the global legend file (only need to do this once effectively)
+                    if cache_name not in legend_labels:
+                        legend_handles.append(h)
+                        legend_labels.append(cache_name)
+                    
+                    i += 1
 
-            plt.tight_layout(pad=0.5) # Reduces whitespace around the plot
-            plt.savefig(os.path.join(figures_dir, f"{prop_name}_{dataset_name}.png")) # PDF is better for LaTeX
-            plt.close()
+                # --- 3. AXIS SCALING & LABELING ---
+                #plt.xlabel("Cache Size")
+                #plt.ylabel(prop_name)
+                
+                plt.yscale("log")
+                
+                # Force the axis to start/end at the same points for all plots
+                plt.xlim(global_min_x, global_max_x)
+
+                plt.tight_layout(pad=0.5) # Reduces whitespace around the plot
+                threshold_round = round(threshold, 2)
+                plt.savefig(os.path.join(figures_dir, f"{prop_name}_{threshold_round}_{dataset_name}.png")) # PDF is better for LaTeX
+                plt.close()
 
     # --- 4. GENERATE SEPARATE LEGEND ---
     # Sort legend to match the sorted cache names used in plotting
@@ -146,13 +153,12 @@ def plot():
             handles_sorted, 
             labels_sorted,
             loc="center",
-            ncol=min(len(labels_sorted), 9),
+            ncol=min(len(labels_sorted), 8),
             frameon=False
         )
         fig_leg.savefig(os.path.join(figures_dir, "legend.png"), bbox_inches="tight")
         plt.close(fig_leg)
     
-
 def get_embeds_paths():
     return list(dataset_filenames.items())
 
@@ -176,7 +182,7 @@ def recall():
         "MissLFU",
         "LRU",
         "LRUK",
-        "DALFU",
+        "LFUDA",
         "ARC",
         "ClusterLRU",
         "ClusterLFU",
@@ -209,13 +215,13 @@ def recall():
 
 def main():
     processor = Processor(NUM_PROCS)
-    for same_embed_distance in np.arange(0.1, 1.0, 0.1):
+    for same_embed_distance in np.arange(0.5, 1.0, 0.2):
         print(f"Running for same_embed_distance={same_embed_distance}")
         batch_size = 1
         count_nn = 1
-        num_samples = 1000
+        num_samples = 100000
         MAX_CACHE_SIZE = 0.1
-        COUNT_STEPS = 10
+        COUNT_STEPS = 8
         dim = 384
 
         faiss_indices_names = {"HotSwap"}
@@ -230,7 +236,7 @@ def main():
             #"MissLFU",
             "LRU",
             "LRUK",
-            "DALFU",
+            "LFUDA",
             "ARC",
             "ClusterLRU",
             "ClusterLFU",
@@ -557,7 +563,7 @@ if __name__ == "__main__":
     #mv = MilvusVectorStore()
     #mv.drop_all()
     #recall()
-    main()
+    #main()
     plot()
     
     #compare_vector_stores()
