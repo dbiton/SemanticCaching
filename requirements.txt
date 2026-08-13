@@ -12,3 +12,7 @@ wordfreq
 xgboost
 pymilvus
 hnswlib
+h5py
+scikit-learn
+networkx
+seaborn
